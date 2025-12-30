@@ -125,3 +125,19 @@ from fastapi import FastAPI
 
 app = FastAPI()
 
+from fastapi import FastAPI
+
+app = FastAPI(title="Blog Lead Crawler API")
+
+@app.get("/")
+def health_check():
+    return {"status": "ok"}
+
+@app.get("/history")
+def history():
+    return {"message": "history endpoint working"}
+
+@app.get("/commercial-sites")
+def commercial_sites():
+    return {"message": "commercial sites endpoint working"}
+
