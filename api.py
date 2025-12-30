@@ -59,3 +59,35 @@ def last_30_days():
         WHERE first_crawled >= %s
         ORDER BY first_crawled DESC
     """, (datetime.now() - timedelta(day
+from pydantic import BaseModel
+from datetime import datetime
+
+class CrawlRequest(BaseModel):
+    blog_url: str
+
+@app.post("/crawl")
+def crawl_blog(data: CrawlRequest):
+    try:
+        cursor = db.cursor(dictionary=True)
+
+        cursor.execute(
+            """
+            INSERT INTO blog_pages (blog_url, first_crawled)
+            VALUES (%s, %s)
+            """,
+            (data.blog_url, datetime.utcnow())
+        )
+
+        db.commit()
+
+        return {
+            "status": "success",
+            "message": "Blog crawl started",
+            "blog_url": data.blog_url
+        }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e)
+        }
