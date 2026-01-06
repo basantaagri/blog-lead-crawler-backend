@@ -28,7 +28,7 @@ app = FastAPI(
 )
 
 # =========================
-# ✅ FIXED CORS (PRODUCTION SAFE)
+# ✅ CORS (PRODUCTION FIXED)
 # =========================
 app.add_middleware(
     CORSMiddleware,
@@ -59,8 +59,8 @@ def get_db():
 # CONSTANTS
 # =========================
 CASINO_KEYWORDS = [
-    "casino","bet","betting","poker","slots","sportsbook",
-    "wager","odds","gambling","roulette","blackjack"
+    "casino", "bet", "betting", "poker", "slots", "sportsbook",
+    "wager", "odds", "gambling", "roulette", "blackjack"
 ]
 
 # =========================
@@ -71,7 +71,7 @@ def health():
     return {"status": "ok"}
 
 # =========================
-# HISTORY
+# HISTORY (USED BY FRONTEND)
 # =========================
 @app.get("/history")
 def last_30_days():
@@ -113,7 +113,7 @@ def crawl_blog(data: CrawlRequest):
         return {"status": "inserted", "id": blog_id}
     except UniqueViolation:
         conn.rollback()
-        raise HTTPException(409, "Blog URL already exists")
+        raise HTTPException(status_code=409, detail="Blog URL already exists")
     finally:
         cur.close()
         conn.close()
@@ -140,9 +140,12 @@ def extract_outbound_links(page_url: str):
             continue
 
         rel = [r.lower() for r in a.get("rel", [])]
-        is_dofollow = not any(x in rel for x in ["nofollow","ugc","sponsored"])
+        is_dofollow = not any(x in rel for x in ["nofollow", "ugc", "sponsored"])
 
-        links.append({"url": full_url, "is_dofollow": is_dofollow})
+        links.append({
+            "url": full_url,
+            "is_dofollow": is_dofollow
+        })
 
     return links
 
@@ -157,10 +160,13 @@ def crawl_links(data: CrawlRequest):
     conn = get_db()
     cur = conn.cursor()
     try:
-        cur.execute("SELECT id FROM blog_pages WHERE blog_url=%s", (data.blog_url,))
+        cur.execute(
+            "SELECT id FROM blog_pages WHERE blog_url=%s",
+            (data.blog_url,)
+        )
         blog = cur.fetchone()
         if not blog:
-            raise HTTPException(404, "Insert blog first")
+            raise HTTPException(status_code=404, detail="Insert blog first")
 
         blog_id = blog["id"]
         links = extract_outbound_links(data.blog_url)
@@ -173,7 +179,8 @@ def crawl_links(data: CrawlRequest):
             casino_count += int(casino)
             try:
                 cur.execute("""
-                    INSERT INTO outbound_links (blog_page_id, url, is_casino, is_dofollow)
+                    INSERT INTO outbound_links
+                    (blog_page_id, url, is_casino, is_dofollow)
                     VALUES (%s,%s,%s,%s)
                 """, (blog_id, l["url"], casino, l["is_dofollow"]))
                 saved += 1
@@ -191,7 +198,7 @@ def crawl_links(data: CrawlRequest):
         conn.close()
 
 # =========================
-# LEAD SCORE
+# LEAD SCORE (USED BY FRONTEND)
 # =========================
 @app.get("/blog-lead-score/{blog_id}")
 def blog_lead_score(blog_id: int):
@@ -209,12 +216,12 @@ def blog_lead_score(blog_id: int):
         r = cur.fetchone()
 
         total = r["total"] or 0
-        casino_pct = (r["casino"]/total)*100 if total else 0
-        dofollow_pct = (r["dofollow"]/total)*100 if total else 0
+        casino_pct = (r["casino"] / total) * 100 if total else 0
+        dofollow_pct = (r["dofollow"] / total) * 100 if total else 0
 
         score = round(
-            (60 if casino_pct == 0 else max(0, 60*(1-casino_pct/20))) +
-            (dofollow_pct/100)*30 +
+            (60 if casino_pct == 0 else max(0, 60 * (1 - casino_pct / 20))) +
+            (dofollow_pct / 100) * 30 +
             (10 if 5 <= total <= 50 else 5),
             2
         )
@@ -222,8 +229,8 @@ def blog_lead_score(blog_id: int):
         return {
             "blog_id": blog_id,
             "total_links": total,
-            "casino_percentage": round(casino_pct,2),
-            "dofollow_percentage": round(dofollow_pct,2),
+            "casino_percentage": round(casino_pct, 2),
+            "dofollow_percentage": round(dofollow_pct, 2),
             "lead_score": score
         }
     finally:
