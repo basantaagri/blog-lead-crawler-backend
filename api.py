@@ -1,93 +1,231 @@
-from fastapi import FastAPI
+from dotenv import load_dotenv
+load_dotenv()
+
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
-import pymysql
 from datetime import datetime, timedelta
-import csv
-import io
+from pydantic import BaseModel
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from psycopg2.errors import UniqueViolation
 import os
 
+# Crawling imports
+import requests
+from bs4 import BeautifulSoup
+import tldextract
+from urllib.parse import urljoin
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# =========================
+# APP INIT
+# =========================
 app = FastAPI(
     title="Blog Lead Crawler API",
     version="1.0.0"
 )
 
 # =========================
-# CORS
+# ✅ FIXED CORS (PRODUCTION SAFE)
 # =========================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://fancy-mermaid-0d2e68.netlify.app",
+        "http://localhost:3000"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # =========================
-# DATABASE CONFIG
-# (Use ENV vars on Render)
+# DATABASE
 # =========================
-DB_CONFIG = {
-    "host": os.getenv("DB_HOST", "localhost"),
-    "user": os.getenv("DB_USER", "root"),
-    "password": os.getenv("DB_PASSWORD", ""),
-    "database": os.getenv("DB_NAME", "blog_lead_crawler"),
-    "cursorclass": pymysql.cursors.DictCursor
-}
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL not found")
 
 def get_db():
-    return pymysql.connect(**DB_CONFIG)
+    return psycopg2.connect(
+        DATABASE_URL,
+        cursor_factory=RealDictCursor,
+        sslmode="require"
+    )
 
 # =========================
-# HEALTH CHECK
+# CONSTANTS
+# =========================
+CASINO_KEYWORDS = [
+    "casino","bet","betting","poker","slots","sportsbook",
+    "wager","odds","gambling","roulette","blackjack"
+]
+
+# =========================
+# HEALTH
 # =========================
 @app.get("/")
 def health():
     return {"status": "ok"}
 
 # =========================
-# LAST 30 DAYS BLOG HISTORY
+# HISTORY
 # =========================
 @app.get("/history")
 def last_30_days():
-    db = get_db()
-    cur = db.cursor()
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT id, blog_url, first_crawled
+            FROM blog_pages
+            WHERE first_crawled >= %s
+            ORDER BY first_crawled DESC
+        """, (datetime.utcnow() - timedelta(days=30),))
+        return cur.fetchall()
+    finally:
+        cur.close()
+        conn.close()
 
-    cur.execute("""
-        SELECT blog_url, first_crawled
-        FROM blogs
-        WHERE first_crawled >= %s
-        ORDER BY first_crawled DESC
-    """, (datetime.now() - timedelta(day
-from pydantic import BaseModel
-from datetime import datetime
-
+# =========================
+# MODELS
+# =========================
 class CrawlRequest(BaseModel):
     blog_url: str
 
+# =========================
+# INSERT BLOG
+# =========================
 @app.post("/crawl")
 def crawl_blog(data: CrawlRequest):
+    conn = get_db()
+    cur = conn.cursor()
     try:
-        cursor = db.cursor(dictionary=True)
-
-        cursor.execute(
-            """
+        cur.execute("""
             INSERT INTO blog_pages (blog_url, first_crawled)
             VALUES (%s, %s)
-            """,
-            (data.blog_url, datetime.utcnow())
+            RETURNING id
+        """, (data.blog_url, datetime.utcnow()))
+        blog_id = cur.fetchone()["id"]
+        conn.commit()
+        return {"status": "inserted", "id": blog_id}
+    except UniqueViolation:
+        conn.rollback()
+        raise HTTPException(409, "Blog URL already exists")
+    finally:
+        cur.close()
+        conn.close()
+
+# =========================
+# LINK EXTRACTION
+# =========================
+def extract_outbound_links(page_url: str):
+    headers = {"User-Agent": "Mozilla/5.0"}
+    r = requests.get(page_url, headers=headers, timeout=20, verify=False)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    base_domain = tldextract.extract(page_url).registered_domain
+    links = []
+
+    for a in soup.find_all("a", href=True):
+        full_url = urljoin(page_url, a["href"])
+        if not full_url.startswith("http"):
+            continue
+
+        domain = tldextract.extract(full_url).registered_domain
+        if domain == base_domain or not domain:
+            continue
+
+        rel = [r.lower() for r in a.get("rel", [])]
+        is_dofollow = not any(x in rel for x in ["nofollow","ugc","sponsored"])
+
+        links.append({"url": full_url, "is_dofollow": is_dofollow})
+
+    return links
+
+def is_casino_link(url: str) -> bool:
+    return any(k in url.lower() for k in CASINO_KEYWORDS)
+
+# =========================
+# CRAWL LINKS
+# =========================
+@app.post("/crawl-links")
+def crawl_links(data: CrawlRequest):
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT id FROM blog_pages WHERE blog_url=%s", (data.blog_url,))
+        blog = cur.fetchone()
+        if not blog:
+            raise HTTPException(404, "Insert blog first")
+
+        blog_id = blog["id"]
+        links = extract_outbound_links(data.blog_url)
+
+        saved = 0
+        casino_count = 0
+
+        for l in links:
+            casino = is_casino_link(l["url"])
+            casino_count += int(casino)
+            try:
+                cur.execute("""
+                    INSERT INTO outbound_links (blog_page_id, url, is_casino, is_dofollow)
+                    VALUES (%s,%s,%s,%s)
+                """, (blog_id, l["url"], casino, l["is_dofollow"]))
+                saved += 1
+            except Exception:
+                conn.rollback()
+
+        conn.commit()
+        return {
+            "total_outbound_links": len(links),
+            "saved_new_links": saved,
+            "casino_links_count": casino_count
+        }
+    finally:
+        cur.close()
+        conn.close()
+
+# =========================
+# LEAD SCORE
+# =========================
+@app.get("/blog-lead-score/{blog_id}")
+def blog_lead_score(blog_id: int):
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE is_casino) AS casino,
+                COUNT(*) FILTER (WHERE is_dofollow) AS dofollow
+            FROM outbound_links
+            WHERE blog_page_id=%s
+        """, (blog_id,))
+        r = cur.fetchone()
+
+        total = r["total"] or 0
+        casino_pct = (r["casino"]/total)*100 if total else 0
+        dofollow_pct = (r["dofollow"]/total)*100 if total else 0
+
+        score = round(
+            (60 if casino_pct == 0 else max(0, 60*(1-casino_pct/20))) +
+            (dofollow_pct/100)*30 +
+            (10 if 5 <= total <= 50 else 5),
+            2
         )
 
-        db.commit()
-
         return {
-            "status": "success",
-            "message": "Blog crawl started",
-            "blog_url": data.blog_url
+            "blog_id": blog_id,
+            "total_links": total,
+            "casino_percentage": round(casino_pct,2),
+            "dofollow_percentage": round(dofollow_pct,2),
+            "lead_score": score
         }
-
-    except Exception as e:
-        return {
-            "status": "error",
-            "error": str(e)
-        }
+    finally:
+        cur.close()
+        conn.close()

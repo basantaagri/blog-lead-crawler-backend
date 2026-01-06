@@ -1,7 +1,8 @@
 fastapi
 uvicorn
+psycopg2-binary
+python-dotenv
 requests
 beautifulsoup4
-pandas
-mysql-connector-python
-python-dotenv
+tldextract
+urllib3
