@@ -19,7 +19,7 @@ import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-print("### BLOG LEAD CRAWLER — FINAL VERSION RUNNING ###")
+print("### BLOG LEAD CRAWLER — HARD FAIL SAFE VERSION RUNNING ###")
 
 # =========================
 # APP INIT
@@ -151,15 +151,31 @@ def fetch_sitemap_urls(blog_url: str) -> list:
     return results
 
 # =========================
-# 🔒 SAFE LINK EXTRACTION
+# 🔒 HARD FAIL SAFE LINK EXTRACTION
 # =========================
 def extract_outbound_links(page_url: str) -> list:
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; BlogLeadCrawler/1.0)"
+    }
     links = []
 
     try:
-        r = requests.get(page_url, headers=headers, timeout=20, verify=False)
-        if r.status_code != 200:
+        r = requests.get(
+            page_url,
+            headers=headers,
+            timeout=15,
+            verify=False,
+            allow_redirects=True
+        )
+
+        # 🔐 BLOCK BAD RESPONSES
+        if r.status_code >= 400:
+            print(f"[BLOCKED] {page_url} → {r.status_code}")
+            return []
+
+        # 🔐 ONLY HTML
+        if not r.headers.get("content-type", "").startswith("text/html"):
+            print(f"[SKIP NON-HTML] {page_url}")
             return []
 
         soup = BeautifulSoup(r.text, "html.parser")
@@ -187,8 +203,9 @@ def extract_outbound_links(page_url: str) -> list:
 
     except Exception as e:
         print(f"[FAILED PAGE] {page_url} → {str(e)}")
+        return []
 
-    # de-duplicate per page
+    # 🔐 DEDUPE PER PAGE
     return list({l["url"]: l for l in links}.values())
 
 def upsert_commercial_site(cur, url, is_casino):
@@ -278,7 +295,7 @@ def crawl_blog(data: CrawlRequest):
         conn.close()
 
 # =========================
-# 🚨 FIXED /crawl-links (IMPORTANT)
+# 🚨 HARD FAIL SAFE /crawl-links
 # =========================
 @app.post("/crawl-links")
 def crawl_links(data: CrawlRequest):
