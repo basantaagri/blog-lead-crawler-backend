@@ -9,25 +9,23 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
 
-# Crawling imports
 import requests
 from bs4 import BeautifulSoup
-import tldextract
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
+import xml.etree.ElementTree as ET
 import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+print("### BLOG LEAD CRAWLER — FINAL VERSION RUNNING ###")
+
 # =========================
 # APP INIT
 # =========================
-app = FastAPI(
-    title="Blog Lead Crawler API",
-    version="1.0.0"
-)
+app = FastAPI(title="Blog Lead Crawler API", version="1.0.0")
 
 # =========================
-# CORS (PRODUCTION FIXED)
+# CORS
 # =========================
 app.add_middleware(
     CORSMiddleware,
@@ -57,10 +55,147 @@ def get_db():
 # =========================
 # CONSTANTS
 # =========================
+MAX_PAGES = 1000
+
 CASINO_KEYWORDS = [
-    "casino", "bet", "betting", "poker", "slots", "sportsbook",
-    "wager", "odds", "gambling", "roulette", "blackjack"
+    "casino", "bet", "betting", "poker", "slots",
+    "sportsbook", "gambling", "roulette", "blackjack"
 ]
+
+# =========================
+# HELPERS
+# =========================
+def normalize_blog_url(url: str) -> str:
+    url = url.strip()
+    if not url.startswith("http"):
+        url = "https://" + url
+    return url.rstrip("/")
+
+def is_within_last_12_months(lastmod: str) -> bool:
+    if not lastmod:
+        return True
+    try:
+        post_date = datetime.fromisoformat(lastmod[:10])
+        return post_date >= datetime.utcnow() - timedelta(days=365)
+    except Exception:
+        return True
+
+def is_valid_post_url(url: str, domain: str) -> bool:
+    if domain not in url:
+        return False
+    blacklist = ["/tag/", "/category/", "/author/", "/page/"]
+    return not any(b in url for b in blacklist)
+
+def extract_domain(url: str) -> str:
+    return urlparse(url).netloc.lower().replace("www.", "")
+
+def is_casino_link(url: str) -> bool:
+    return any(k in url.lower() for k in CASINO_KEYWORDS)
+
+def fetch_child_sitemap(sitemap_url: str) -> list:
+    results = []
+    try:
+        r = requests.get(sitemap_url, timeout=15, verify=False)
+        root = ET.fromstring(r.text)
+        ns = {"ns": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+
+        for url in root.findall("ns:url", ns):
+            loc = url.find("ns:loc", ns)
+            lastmod = url.find("ns:lastmod", ns)
+            if loc is not None:
+                results.append({
+                    "url": loc.text.strip(),
+                    "lastmod": lastmod.text.strip() if lastmod is not None else None
+                })
+    except Exception:
+        pass
+
+    return results
+
+def fetch_sitemap_urls(blog_url: str) -> list:
+    sitemap_paths = ["/sitemap.xml", "/post-sitemap.xml", "/wp-sitemap.xml"]
+    results = []
+
+    for path in sitemap_paths:  # ✅ FIXED HERE
+        try:
+            r = requests.get(blog_url + path, timeout=15, verify=False)
+            if r.status_code != 200:
+                continue
+
+            root = ET.fromstring(r.text)
+            ns = {"ns": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+
+            sitemap_tags = root.findall("ns:sitemap", ns)
+            if sitemap_tags:
+                for sm in sitemap_tags:
+                    loc = sm.find("ns:loc", ns)
+                    if loc is not None:
+                        results.extend(fetch_child_sitemap(loc.text))
+                return results
+
+            for url in root.findall("ns:url", ns):
+                loc = url.find("ns:loc", ns)
+                lastmod = url.find("ns:lastmod", ns)
+                if loc is not None:
+                    results.append({
+                        "url": loc.text.strip(),
+                        "lastmod": lastmod.text.strip() if lastmod is not None else None
+                    })
+
+            if results:
+                return results
+
+        except Exception:
+            continue
+
+    return results
+
+def extract_outbound_links(page_url: str):
+    headers = {"User-Agent": "Mozilla/5.0"}
+    r = requests.get(page_url, headers=headers, timeout=20, verify=False)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    base_domain = urlparse(page_url).netloc
+    links = []
+
+    for a in soup.find_all("a", href=True):
+        full_url = urljoin(page_url, a["href"])
+        if not full_url.startswith("http"):
+            continue
+
+        domain = urlparse(full_url).netloc
+        if domain == base_domain or not domain:
+            continue
+
+        rel = [r.lower() for r in a.get("rel", [])]
+        is_dofollow = not any(x in rel for x in ["nofollow", "ugc", "sponsored"])
+
+        links.append({"url": full_url, "is_dofollow": is_dofollow})
+
+    return links
+
+def upsert_commercial_site(cur, link_url, is_dofollow, is_casino):
+    domain = extract_domain(link_url)
+
+    cur.execute("""
+        INSERT INTO commercial_sites (commercial_domain, total_links, dofollow_percent, is_casino)
+        VALUES (%s, 0, 0, FALSE)
+        ON CONFLICT (commercial_domain) DO NOTHING
+    """, (domain,))
+
+    cur.execute("""
+        UPDATE commercial_sites
+        SET total_links = total_links + 1,
+            is_casino = CASE WHEN is_casino OR %s THEN TRUE ELSE FALSE END
+        WHERE commercial_domain = %s
+    """, (is_casino, domain))
+
+# =========================
+# MODELS
+# =========================
+class CrawlRequest(BaseModel):
+    blog_url: str
 
 # =========================
 # HEALTH
@@ -70,173 +205,49 @@ def health():
     return {"status": "ok"}
 
 # =========================
-# HISTORY
-# =========================
-@app.get("/history")
-def last_30_days():
-    conn = get_db()
-    cur = conn.cursor()
-    try:
-        cur.execute("""
-            SELECT id, blog_url, first_crawled
-            FROM blog_pages
-            WHERE first_crawled >= %s
-            ORDER BY first_crawled DESC
-        """, (datetime.utcnow() - timedelta(days=30),))
-        return cur.fetchall()
-    finally:
-        cur.close()
-        conn.close()
-
-# =========================
-# MODELS
-# =========================
-class CrawlRequest(BaseModel):
-    blog_url: str
-
-# =========================
-# INSERT BLOG  (🔥 RAW ERROR EXPOSURE)
+# FINAL /crawl
 # =========================
 @app.post("/crawl")
 def crawl_blog(data: CrawlRequest):
-    try:
-        conn = get_db()
-        cur = conn.cursor()
+    blog_url = normalize_blog_url(data.blog_url)
+    domain = urlparse(blog_url).netloc
+    now = datetime.utcnow()
 
-        cur.execute("""
-            INSERT INTO blog_pages (blog_url, first_crawled)
-            VALUES (%s, %s)
-            RETURNING id
-        """, (data.blog_url, datetime.utcnow()))
-
-        blog_id = cur.fetchone()["id"]
-        conn.commit()
-
-        return {"status": "inserted", "id": blog_id}
-
-    except Exception as e:
-        # 🔴 THIS IS THE KEY FIX — NO GUESSING
-        raise HTTPException(status_code=500, detail=str(e))
-
-    finally:
-        try:
-            cur.close()
-            conn.close()
-        except:
-            pass
-
-# =========================
-# LINK EXTRACTION
-# =========================
-def extract_outbound_links(page_url: str):
-    headers = {"User-Agent": "Mozilla/5.0"}
-    r = requests.get(page_url, headers=headers, timeout=20, verify=False)
-    r.raise_for_status()
-    soup = BeautifulSoup(r.text, "html.parser")
-
-    base_domain = tldextract.extract(page_url).registered_domain
-    links = []
-
-    for a in soup.find_all("a", href=True):
-        full_url = urljoin(page_url, a["href"])
-        if not full_url.startswith("http"):
-            continue
-
-        domain = tldextract.extract(full_url).registered_domain
-        if domain == base_domain or not domain:
-            continue
-
-        rel = [r.lower() for r in a.get("rel", [])]
-        is_dofollow = not any(x in rel for x in ["nofollow", "ugc", "sponsored"])
-
-        links.append({
-            "url": full_url,
-            "is_dofollow": is_dofollow
-        })
-
-    return links
-
-def is_casino_link(url: str) -> bool:
-    return any(k in url.lower() for k in CASINO_KEYWORDS)
-
-# =========================
-# CRAWL LINKS
-# =========================
-@app.post("/crawl-links")
-def crawl_links(data: CrawlRequest):
     conn = get_db()
     cur = conn.cursor()
+
     try:
-        cur.execute("SELECT id FROM blog_pages WHERE blog_url=%s", (data.blog_url,))
-        blog = cur.fetchone()
-        if not blog:
-            raise HTTPException(status_code=404, detail="Insert blog first")
+        cur.execute("SELECT id FROM blog_pages WHERE blog_url = %s", (blog_url,))
+        if cur.fetchone():
+            return {"status": "already_exists", "blog": blog_url, "blog_posts_added": 0}
 
-        blog_id = blog["id"]
-        links = extract_outbound_links(data.blog_url)
+        cur.execute("""
+            INSERT INTO blog_pages (blog_url, first_crawled, is_root)
+            VALUES (%s, %s, TRUE)
+        """, (blog_url, now))
 
-        saved = 0
-        casino_count = 0
+        urls = fetch_sitemap_urls(blog_url)
 
-        for l in links:
-            casino = is_casino_link(l["url"])
-            casino_count += int(casino)
-            try:
-                cur.execute("""
-                    INSERT INTO outbound_links
-                    (blog_page_id, url, is_casino, is_dofollow)
-                    VALUES (%s,%s,%s,%s)
-                """, (blog_id, l["url"], casino, l["is_dofollow"]))
-                saved += 1
-            except Exception:
-                conn.rollback()
+        inserted = 0
+        for item in urls:
+            if inserted >= MAX_PAGES:
+                break
+            if not is_valid_post_url(item["url"], domain):
+                continue
+            if not is_within_last_12_months(item["lastmod"]):
+                continue
+
+            cur.execute("""
+                INSERT INTO blog_pages (blog_url, first_crawled, is_root)
+                VALUES (%s, %s, FALSE)
+                ON CONFLICT (blog_url) DO NOTHING
+            """, (item["url"].rstrip("/"), now))
+
+            inserted += 1
 
         conn.commit()
-        return {
-            "total_outbound_links": len(links),
-            "saved_new_links": saved,
-            "casino_links_count": casino_count
-        }
-    finally:
-        cur.close()
-        conn.close()
+        return {"status": "inserted", "blog": blog_url, "blog_posts_added": inserted}
 
-# =========================
-# LEAD SCORE
-# =========================
-@app.get("/blog-lead-score/{blog_id}")
-def blog_lead_score(blog_id: int):
-    conn = get_db()
-    cur = conn.cursor()
-    try:
-        cur.execute("""
-            SELECT
-                COUNT(*) AS total,
-                COUNT(*) FILTER (WHERE is_casino) AS casino,
-                COUNT(*) FILTER (WHERE is_dofollow) AS dofollow
-            FROM outbound_links
-            WHERE blog_page_id=%s
-        """, (blog_id,))
-        r = cur.fetchone()
-
-        total = r["total"] or 0
-        casino_pct = (r["casino"] / total) * 100 if total else 0
-        dofollow_pct = (r["dofollow"] / total) * 100 if total else 0
-
-        score = round(
-            (60 if casino_pct == 0 else max(0, 60 * (1 - casino_pct / 20))) +
-            (dofollow_pct / 100) * 30 +
-            (10 if 5 <= total <= 50 else 5),
-            2
-        )
-
-        return {
-            "blog_id": blog_id,
-            "total_links": total,
-            "casino_percentage": round(casino_pct, 2),
-            "dofollow_percentage": round(dofollow_pct, 2),
-            "lead_score": score
-        }
     finally:
         cur.close()
         conn.close()
