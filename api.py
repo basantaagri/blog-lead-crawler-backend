@@ -3,11 +3,14 @@ load_dotenv()
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from datetime import datetime, timedelta
 from pydantic import BaseModel
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
+import csv
+import io
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
@@ -76,9 +79,27 @@ def extract_domain(url: str) -> str:
 def is_casino_link(url: str) -> bool:
     return any(k in url.lower() for k in CASINO_KEYWORDS)
 
+def is_within_last_12_months(lastmod: str) -> bool:
+    if not lastmod:
+        return True
+    try:
+        d = datetime.fromisoformat(lastmod[:10])
+        return d >= datetime.utcnow() - timedelta(days=365)
+    except Exception:
+        return True
+
+# =========================================================
+# 🔴 ONLY FIX — REMOVE POST-SHAPE ASSUMPTION (FINAL)
+# =========================================================
 def is_valid_post_url(url: str, domain: str) -> bool:
-    blacklist = ["/tag/", "/category/", "/author/", "/page/"]
-    return domain in url and not any(b in url for b in blacklist)
+    blacklist = [
+        "/tag/", "/category/", "/author/", "/page/",
+        "/wp-admin", "/wp-content", "/feed", "/comments"
+    ]
+    return (
+        urlparse(url).netloc.replace("www.", "") == domain
+        and not any(b in url for b in blacklist)
+    )
 
 # =========================
 # SITEMAP
@@ -139,18 +160,24 @@ def fetch_sitemap_urls(blog_url: str) -> list:
     return results
 
 # =========================
-# FALLBACK HTML DISCOVERY
+# 🔁 FALLBACK BLOG DISCOVERY
 # =========================
 def fallback_discover_posts(blog_url: str, domain: str, limit=100):
+    headers = {"User-Agent": "Mozilla/5.0"}
     found = []
+
     try:
-        r = requests.get(blog_url, timeout=20, verify=False)
+        r = requests.get(blog_url, headers=headers, timeout=20, verify=False)
+        if r.status_code != 200:
+            return []
+
         soup = BeautifulSoup(r.text, "html.parser")
 
         for a in soup.find_all("a", href=True):
             full = urljoin(blog_url, a["href"])
-            if domain in full and any(x in full for x in ["/blog/", "/post/", "/202"]):
-                found.append(full.rstrip("/"))
+            if domain not in full:
+                continue
+            found.append(full.rstrip("/"))
             if len(found) >= limit:
                 break
     except Exception:
@@ -159,12 +186,17 @@ def fallback_discover_posts(blog_url: str, domain: str, limit=100):
     return list(set(found))
 
 # =========================
-# OUTBOUND LINKS
+# LINK EXTRACTION
 # =========================
 def extract_outbound_links(page_url: str) -> list:
+    headers = {"User-Agent": "Mozilla/5.0 (BlogLeadCrawler)"}
     links = []
+
     try:
-        r = requests.get(page_url, timeout=15, verify=False)
+        r = requests.get(page_url, headers=headers, timeout=15, verify=False)
+        if r.status_code >= 400:
+            return []
+
         if not r.headers.get("content-type", "").startswith("text/html"):
             return []
 
@@ -181,10 +213,7 @@ def extract_outbound_links(page_url: str) -> list:
             rel = [x.lower() for x in a.get("rel", [])]
             is_dofollow = not any(x in rel for x in ["nofollow", "ugc", "sponsored"])
 
-            links.append({
-                "url": full,
-                "is_dofollow": is_dofollow
-            })
+            links.append({"url": full, "is_dofollow": is_dofollow})
     except Exception:
         return []
 
@@ -237,7 +266,7 @@ def crawl_blog(data: CrawlRequest):
 
     urls = fetch_sitemap_urls(blog_url)
     if not urls:
-        urls = [{"url": u} for u in fallback_discover_posts(blog_url, domain)]
+        urls = [{"url": u, "lastmod": None} for u in fallback_discover_posts(blog_url, domain)]
 
     inserted = 0
     for u in urls:
@@ -256,63 +285,5 @@ def crawl_blog(data: CrawlRequest):
     conn.commit()
     cur.close()
     conn.close()
+
     return {"inserted_pages": inserted}
-
-# =========================
-# 🔴 FIXED ENDPOINT
-# =========================
-@app.post("/crawl-links")
-def crawl_links(data: CrawlRequest):
-    blog_url = normalize_blog_url(data.blog_url)
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT id, blog_url
-        FROM blog_pages
-        WHERE COALESCE(is_root,FALSE)=FALSE
-        AND blog_url LIKE %s
-    """, (blog_url + "%",))
-    pages = cur.fetchall()
-
-    if not pages:
-        raise HTTPException(404, "Run /crawl first")
-
-    saved = casino = 0
-
-    for p in pages:
-        try:
-            links = extract_outbound_links(p["blog_url"])
-            if not links:
-                continue
-
-            for l in links:
-                try:
-                    is_c = is_casino_link(l["url"])
-                    cur.execute("""
-                        INSERT INTO outbound_links
-                        (blog_page_id,url,is_casino,is_dofollow)
-                        VALUES (%s,%s,%s,%s)
-                        ON CONFLICT DO NOTHING
-                        RETURNING id
-                    """, (p["id"], l["url"], is_c, l["is_dofollow"]))
-
-                    if cur.fetchone():
-                        upsert_commercial_site(cur, l["url"], is_c)
-                        saved += 1
-                        casino += int(is_c)
-
-                except Exception:
-                    conn.rollback()
-                    continue
-
-        except Exception:
-            conn.rollback()
-            continue
-
-    conn.commit()
-    cur.close()
-    conn.close()
-
-    return {"saved_links": saved, "casino_links": casino}
