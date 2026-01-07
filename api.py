@@ -7,7 +7,6 @@ from datetime import datetime, timedelta
 from pydantic import BaseModel
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from psycopg2.errors import UniqueViolation
 import os
 
 # Crawling imports
@@ -28,7 +27,7 @@ app = FastAPI(
 )
 
 # =========================
-# ✅ CORS (PRODUCTION FIXED)
+# CORS (PRODUCTION FIXED)
 # =========================
 app.add_middleware(
     CORSMiddleware,
@@ -71,7 +70,7 @@ def health():
     return {"status": "ok"}
 
 # =========================
-# HISTORY (USED BY FRONTEND)
+# HISTORY
 # =========================
 @app.get("/history")
 def last_30_days():
@@ -96,27 +95,35 @@ class CrawlRequest(BaseModel):
     blog_url: str
 
 # =========================
-# INSERT BLOG
+# INSERT BLOG  (🔥 RAW ERROR EXPOSURE)
 # =========================
 @app.post("/crawl")
 def crawl_blog(data: CrawlRequest):
-    conn = get_db()
-    cur = conn.cursor()
     try:
+        conn = get_db()
+        cur = conn.cursor()
+
         cur.execute("""
             INSERT INTO blog_pages (blog_url, first_crawled)
             VALUES (%s, %s)
             RETURNING id
         """, (data.blog_url, datetime.utcnow()))
+
         blog_id = cur.fetchone()["id"]
         conn.commit()
+
         return {"status": "inserted", "id": blog_id}
-    except UniqueViolation:
-        conn.rollback()
-        raise HTTPException(status_code=409, detail="Blog URL already exists")
+
+    except Exception as e:
+        # 🔴 THIS IS THE KEY FIX — NO GUESSING
+        raise HTTPException(status_code=500, detail=str(e))
+
     finally:
-        cur.close()
-        conn.close()
+        try:
+            cur.close()
+            conn.close()
+        except:
+            pass
 
 # =========================
 # LINK EXTRACTION
@@ -160,10 +167,7 @@ def crawl_links(data: CrawlRequest):
     conn = get_db()
     cur = conn.cursor()
     try:
-        cur.execute(
-            "SELECT id FROM blog_pages WHERE blog_url=%s",
-            (data.blog_url,)
-        )
+        cur.execute("SELECT id FROM blog_pages WHERE blog_url=%s", (data.blog_url,))
         blog = cur.fetchone()
         if not blog:
             raise HTTPException(status_code=404, detail="Insert blog first")
@@ -198,7 +202,7 @@ def crawl_links(data: CrawlRequest):
         conn.close()
 
 # =========================
-# LEAD SCORE (USED BY FRONTEND)
+# LEAD SCORE
 # =========================
 @app.get("/blog-lead-score/{blog_id}")
 def blog_lead_score(blog_id: int):
