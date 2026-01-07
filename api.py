@@ -13,13 +13,15 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 import xml.etree.ElementTree as ET
 import urllib3
+import time
+import random
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 print("### BLOG LEAD CRAWLER — HARD FAIL SAFE VERSION RUNNING ###")
 
 # =========================
-# GLOBAL BROWSER HEADERS (MANDATORY 2026)
+# GLOBAL BROWSER HEADERS
 # =========================
 HEADERS = {
     "User-Agent": (
@@ -41,7 +43,7 @@ session.headers.update(HEADERS)
 # =========================
 # APP INIT
 # =========================
-app = FastAPI(title="Blog Lead Crawler API", version="1.0.0")
+app = FastAPI(title="Blog Lead Crawler API", version="1.1.0")
 
 # =========================
 # CORS
@@ -81,6 +83,14 @@ CASINO_KEYWORDS = [
     "sportsbook", "gambling", "roulette", "blackjack"
 ]
 
+BLOCK_SIGNATURES = [
+    "cloudflare",
+    "attention required",
+    "verify you are human",
+    "/cdn-cgi/",
+    "access denied"
+]
+
 # =========================
 # HELPERS
 # =========================
@@ -96,9 +106,6 @@ def extract_domain(url: str) -> str:
 def is_casino_link(url: str) -> bool:
     return any(k in url.lower() for k in CASINO_KEYWORDS)
 
-# =========================================================
-# FINAL POST LOGIC — NO URL SHAPE ASSUMPTIONS
-# =========================================================
 def is_valid_post_url(url: str, domain: str) -> bool:
     blacklist = [
         "/tag/", "/category/", "/author/", "/page/",
@@ -130,36 +137,23 @@ def fetch_child_sitemap(sitemap_url: str) -> list:
 
 def fetch_sitemap_urls(blog_url: str) -> list:
     sitemap_paths = ["/sitemap.xml", "/post-sitemap.xml", "/wp-sitemap.xml"]
-    results = []
-
     for path in sitemap_paths:
         try:
             r = session.get(blog_url + path, timeout=15, verify=False)
             if r.status_code != 200:
                 continue
-
             root = ET.fromstring(r.text)
             ns = {"ns": "http://www.sitemaps.org/schemas/sitemap/0.9"}
-
-            sitemaps = root.findall("ns:sitemap", ns)
-            if sitemaps:
-                for sm in sitemaps:
-                    loc = sm.find("ns:loc", ns)
-                    if loc is not None:
-                        results.extend(fetch_child_sitemap(loc.text))
-                return results
-
+            urls = []
             for u in root.findall("ns:url", ns):
                 loc = u.find("ns:loc", ns)
                 if loc is not None:
-                    results.append({"url": loc.text.strip()})
-
-            if results:
-                return results
+                    urls.append({"url": loc.text.strip()})
+            if urls:
+                return urls
         except Exception:
             continue
-
-    return results
+    return []
 
 # =========================
 # FALLBACK DISCOVERY
@@ -170,9 +164,7 @@ def fallback_discover_posts(blog_url: str, domain: str, limit=100):
         r = session.get(blog_url, timeout=20, verify=False)
         if r.status_code != 200:
             return []
-
         soup = BeautifulSoup(r.text, "html.parser")
-
         for a in soup.find_all("a", href=True):
             full = urljoin(blog_url, a["href"]).rstrip("/")
             if extract_domain(full) == domain:
@@ -181,25 +173,28 @@ def fallback_discover_posts(blog_url: str, domain: str, limit=100):
                 break
     except Exception:
         pass
-
     return list(set(found))
 
 # =========================
-# LINK EXTRACTION
+# LINK EXTRACTION (WITH BLOCK DETECTION)
 # =========================
-def extract_outbound_links(page_url: str) -> list:
-    links = []
-
+def extract_outbound_links(page_url: str):
     try:
         r = session.get(page_url, timeout=15, verify=False)
+        html = r.text.lower()
+
         if r.status_code >= 400:
-            return []
+            return "BLOCKED"
+
+        if any(sig in html for sig in BLOCK_SIGNATURES):
+            return "BLOCKED"
 
         if not r.headers.get("content-type", "").startswith("text/html"):
             return []
 
         soup = BeautifulSoup(r.text, "html.parser")
         base_domain = urlparse(page_url).netloc
+        links = []
 
         for a in soup.find_all("a", href=True):
             full = urljoin(page_url, a["href"])
@@ -210,12 +205,11 @@ def extract_outbound_links(page_url: str) -> list:
 
             rel = [x.lower() for x in a.get("rel", [])]
             is_dofollow = not any(x in rel for x in ["nofollow", "ugc", "sponsored"])
-
             links.append({"url": full, "is_dofollow": is_dofollow})
-    except Exception:
-        return []
 
-    return list({l["url"]: l for l in links}.values())
+        return list({l["url"]: l for l in links}.values())
+    except Exception:
+        return "BLOCKED"
 
 def upsert_commercial_site(cur, url, is_casino):
     domain = extract_domain(url)
@@ -264,9 +258,7 @@ def crawl_blog(data: CrawlRequest):
         VALUES (%s,%s,TRUE)
     """, (blog_url, now))
 
-    urls = fetch_sitemap_urls(blog_url)
-    if not urls:
-        urls = [{"url": u} for u in fallback_discover_posts(blog_url, domain)]
+    urls = fetch_sitemap_urls(blog_url) or [{"url": u} for u in fallback_discover_posts(blog_url, domain)]
 
     inserted = 0
     for u in urls:
@@ -274,7 +266,6 @@ def crawl_blog(data: CrawlRequest):
             break
         if not is_valid_post_url(u["url"], domain):
             continue
-
         cur.execute("""
             INSERT INTO blog_pages (blog_url, first_crawled, is_root)
             VALUES (%s,%s,FALSE)
@@ -304,33 +295,39 @@ def crawl_links(data: CrawlRequest):
     pages = cur.fetchall()
 
     if not pages:
-        cur.close()
-        conn.close()
         raise HTTPException(404, "Run /crawl first")
 
-    saved = casino = 0
+    saved = casino = blocked = 0
 
     for p in pages:
-        links = extract_outbound_links(p["blog_url"])
-        for l in links:
-            try:
-                is_c = is_casino_link(l["url"])
-                cur.execute("""
-                    INSERT INTO outbound_links
-                    (blog_page_id,url,is_casino,is_dofollow)
-                    VALUES (%s,%s,%s,%s)
-                    ON CONFLICT DO NOTHING
-                    RETURNING id
-                """, (p["id"], l["url"], is_c, l["is_dofollow"]))
+        time.sleep(random.uniform(1.2, 2.5))  # pacing
+        result = extract_outbound_links(p["blog_url"])
 
-                if cur.fetchone():
-                    upsert_commercial_site(cur, l["url"], is_c)
-                    saved += 1
-                    casino += int(is_c)
+        if result == "BLOCKED":
+            blocked += 1
+            cur.execute("""
+                UPDATE blog_pages SET crawl_status='blocked'
+                WHERE id=%s
+            """, (p["id"],))
+            conn.commit()
+            continue
 
-                conn.commit()
-            except Exception:
-                conn.rollback()
+        for l in result:
+            is_c = is_casino_link(l["url"])
+            cur.execute("""
+                INSERT INTO outbound_links
+                (blog_page_id,url,is_casino,is_dofollow)
+                VALUES (%s,%s,%s,%s)
+                ON CONFLICT DO NOTHING
+                RETURNING id
+            """, (p["id"], l["url"], is_c, l["is_dofollow"]))
+
+            if cur.fetchone():
+                upsert_commercial_site(cur, l["url"], is_c)
+                saved += 1
+                casino += int(is_c)
+
+        conn.commit()
 
     cur.close()
     conn.close()
@@ -338,5 +335,7 @@ def crawl_links(data: CrawlRequest):
     return {
         "pages_scanned": len(pages),
         "saved_links": saved,
-        "casino_links": casino
+        "casino_links": casino,
+        "blocked_pages": blocked,
+        "crawl_mode": "cloud_partial"
     }
