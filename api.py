@@ -151,12 +151,41 @@ def fetch_sitemap_urls(blog_url: str) -> list:
     return results
 
 # =========================
+# 🔁 FALLBACK BLOG DISCOVERY (HTML)
+# =========================
+def fallback_discover_posts(blog_url: str, domain: str, limit=100):
+    headers = {"User-Agent": "Mozilla/5.0"}
+    found = []
+
+    try:
+        r = requests.get(blog_url, headers=headers, timeout=20, verify=False)
+        if r.status_code != 200:
+            return []
+
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        for a in soup.find_all("a", href=True):
+            full = urljoin(blog_url, a["href"])
+
+            if domain not in full:
+                continue
+
+            if any(x in full for x in ["/blog/", "/post/", "/202"]):
+                found.append(full.rstrip("/"))
+
+            if len(found) >= limit:
+                break
+
+    except Exception:
+        pass
+
+    return list(set(found))
+
+# =========================
 # 🔒 HARD FAIL SAFE LINK EXTRACTION
 # =========================
 def extract_outbound_links(page_url: str) -> list:
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; BlogLeadCrawler/1.0)"
-    }
+    headers = {"User-Agent": "Mozilla/5.0 (BlogLeadCrawler)"}
     links = []
 
     try:
@@ -168,25 +197,17 @@ def extract_outbound_links(page_url: str) -> list:
             allow_redirects=True
         )
 
-        # 🔐 BLOCK BAD RESPONSES
         if r.status_code >= 400:
-            print(f"[BLOCKED] {page_url} → {r.status_code}")
             return []
 
-        # 🔐 ONLY HTML
         if not r.headers.get("content-type", "").startswith("text/html"):
-            print(f"[SKIP NON-HTML] {page_url}")
             return []
 
         soup = BeautifulSoup(r.text, "html.parser")
         base_domain = urlparse(page_url).netloc
 
         for a in soup.find_all("a", href=True):
-            href = a.get("href", "").strip()
-            if not href:
-                continue
-
-            full = urljoin(page_url, href)
+            full = urljoin(page_url, a["href"])
             if not full.startswith("http"):
                 continue
 
@@ -201,11 +222,9 @@ def extract_outbound_links(page_url: str) -> list:
                 "is_dofollow": is_dofollow
             })
 
-    except Exception as e:
-        print(f"[FAILED PAGE] {page_url} → {str(e)}")
+    except Exception:
         return []
 
-    # 🔐 DEDUPE PER PAGE
     return list({l["url"]: l for l in links}.values())
 
 def upsert_commercial_site(cur, url, is_casino):
@@ -239,18 +258,17 @@ def health():
 def history():
     conn = get_db()
     cur = conn.cursor()
-    try:
-        cur.execute("""
-            SELECT blog_url, first_crawled
-            FROM blog_pages
-            WHERE COALESCE(is_root, FALSE) = TRUE
-              AND first_crawled >= NOW() - INTERVAL '30 days'
-            ORDER BY first_crawled DESC
-        """)
-        return cur.fetchall()
-    finally:
-        cur.close()
-        conn.close()
+    cur.execute("""
+        SELECT blog_url, first_crawled
+        FROM blog_pages
+        WHERE COALESCE(is_root,FALSE)=TRUE
+        ORDER BY first_crawled DESC
+        LIMIT 50
+    """)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
 
 @app.post("/crawl")
 def crawl_blog(data: CrawlRequest):
@@ -260,162 +278,79 @@ def crawl_blog(data: CrawlRequest):
 
     conn = get_db()
     cur = conn.cursor()
-    try:
-        cur.execute("SELECT 1 FROM blog_pages WHERE blog_url=%s", (blog_url,))
-        if cur.fetchone():
-            return {"status": "already_exists"}
+
+    cur.execute("SELECT 1 FROM blog_pages WHERE blog_url=%s", (blog_url,))
+    if cur.fetchone():
+        return {"status": "already_exists"}
+
+    cur.execute("""
+        INSERT INTO blog_pages (blog_url, first_crawled, is_root)
+        VALUES (%s,%s,TRUE)
+    """, (blog_url, now))
+
+    urls = fetch_sitemap_urls(blog_url)
+
+    # 🔁 FALLBACK IF SITEMAP EMPTY
+    if not urls:
+        urls = [{"url": u, "lastmod": None} for u in fallback_discover_posts(blog_url, domain)]
+
+    inserted = 0
+    for u in urls:
+        if inserted >= MAX_PAGES:
+            break
+        if not is_valid_post_url(u["url"], domain):
+            continue
 
         cur.execute("""
             INSERT INTO blog_pages (blog_url, first_crawled, is_root)
-            VALUES (%s, %s, TRUE)
-        """, (blog_url, now))
+            VALUES (%s,%s,FALSE)
+            ON CONFLICT DO NOTHING
+        """, (u["url"], now))
+        inserted += 1
 
-        urls = fetch_sitemap_urls(blog_url)
-        count = 0
+    conn.commit()
+    cur.close()
+    conn.close()
 
-        for u in urls:
-            if count >= MAX_PAGES:
-                break
-            if not is_valid_post_url(u["url"], domain):
-                continue
-            if not is_within_last_12_months(u["lastmod"]):
-                continue
+    return {"inserted_pages": inserted}
 
-            cur.execute("""
-                INSERT INTO blog_pages (blog_url, first_crawled, is_root)
-                VALUES (%s, %s, FALSE)
-                ON CONFLICT DO NOTHING
-            """, (u["url"].rstrip("/"), now))
-            count += 1
-
-        conn.commit()
-        return {"inserted_pages": count}
-    finally:
-        cur.close()
-        conn.close()
-
-# =========================
-# 🚨 HARD FAIL SAFE /crawl-links
-# =========================
 @app.post("/crawl-links")
 def crawl_links(data: CrawlRequest):
     blog_url = normalize_blog_url(data.blog_url)
 
     conn = get_db()
     cur = conn.cursor()
-    try:
-        cur.execute("""
-            SELECT id, blog_url
-            FROM blog_pages
-            WHERE COALESCE(is_root, FALSE) = FALSE
-              AND blog_url LIKE %s
-        """, (blog_url + "%",))
-        pages = cur.fetchall()
 
-        if not pages:
-            raise HTTPException(404, "Run /crawl first")
+    cur.execute("""
+        SELECT id, blog_url
+        FROM blog_pages
+        WHERE COALESCE(is_root,FALSE)=FALSE
+        AND blog_url LIKE %s
+    """, (blog_url + "%",))
+    pages = cur.fetchall()
 
-        saved = 0
-        casino = 0
+    if not pages:
+        raise HTTPException(404, "Run /crawl first")
 
-        for p in pages:
-            links = extract_outbound_links(p["blog_url"])
-            if not links:
-                continue
+    saved = casino = 0
 
-            for l in links:
-                is_c = is_casino_link(l["url"])
+    for p in pages:
+        for l in extract_outbound_links(p["blog_url"]):
+            is_c = is_casino_link(l["url"])
+            cur.execute("""
+                INSERT INTO outbound_links
+                (blog_page_id,url,is_casino,is_dofollow)
+                VALUES (%s,%s,%s,%s)
+                ON CONFLICT DO NOTHING
+                RETURNING id
+            """, (p["id"], l["url"], is_c, l["is_dofollow"]))
+            if cur.fetchone():
+                upsert_commercial_site(cur, l["url"], is_c)
+                saved += 1
                 casino += int(is_c)
 
-                cur.execute("""
-                    INSERT INTO outbound_links
-                    (blog_page_id, url, is_casino, is_dofollow)
-                    VALUES (%s,%s,%s,%s)
-                    ON CONFLICT DO NOTHING
-                    RETURNING id
-                """, (p["id"], l["url"], is_c, l["is_dofollow"]))
+    conn.commit()
+    cur.close()
+    conn.close()
 
-                inserted = cur.fetchone()
-                if inserted:
-                    upsert_commercial_site(cur, l["url"], is_c)
-                    saved += 1
-
-        conn.commit()
-        return {"saved_links": saved, "casino_links": casino}
-    finally:
-        cur.close()
-        conn.close()
-
-# =========================
-# EXPORTS
-# =========================
-@app.get("/export/blog-pages")
-def export_blog_pages():
-    conn = get_db()
-    cur = conn.cursor()
-    try:
-        cur.execute("""
-            SELECT bp.blog_url, p.blog_url AS page, ol.url, ol.is_dofollow, ol.is_casino
-            FROM outbound_links ol
-            JOIN blog_pages p ON p.id = ol.blog_page_id
-            JOIN blog_pages bp ON bp.is_root = TRUE
-            WHERE p.blog_url LIKE bp.blog_url || '%'
-        """)
-        rows = cur.fetchall()
-        out = io.StringIO()
-        w = csv.writer(out)
-        w.writerow(["blog", "page", "commercial", "dofollow", "casino"])
-        for r in rows:
-            w.writerow(r.values())
-        out.seek(0)
-        return StreamingResponse(out, media_type="text/csv")
-    finally:
-        cur.close()
-        conn.close()
-
-@app.get("/export/commercial-sites")
-def export_commercial_sites():
-    conn = get_db()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT * FROM commercial_sites")
-        rows = cur.fetchall()
-        out = io.StringIO()
-        w = csv.writer(out)
-        w.writerow(rows[0].keys())
-        for r in rows:
-            w.writerow(r.values())
-        out.seek(0)
-        return StreamingResponse(out, media_type="text/csv")
-    finally:
-        cur.close()
-        conn.close()
-
-@app.get("/export/blog-summary")
-def export_blog_summary():
-    conn = get_db()
-    cur = conn.cursor()
-    try:
-        cur.execute("""
-            SELECT
-                bp.blog_url,
-                COUNT(DISTINCT split_part(ol.url,'/',3)) AS unique_commercial_sites,
-                ROUND(AVG(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END)*100,2) AS dofollow_percent,
-                BOOL_OR(ol.is_casino) AS casino_present
-            FROM outbound_links ol
-            JOIN blog_pages p ON p.id = ol.blog_page_id
-            JOIN blog_pages bp ON bp.is_root = TRUE
-            WHERE p.blog_url LIKE bp.blog_url || '%'
-            GROUP BY bp.blog_url
-        """)
-        rows = cur.fetchall()
-        out = io.StringIO()
-        w = csv.writer(out)
-        w.writerow(rows[0].keys())
-        for r in rows:
-            w.writerow(r.values())
-        out.seek(0)
-        return StreamingResponse(out, media_type="text/csv")
-    finally:
-        cur.close()
-        conn.close()
+    return {"saved_links": saved, "casino_links": casino}
