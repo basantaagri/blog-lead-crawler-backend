@@ -19,6 +19,25 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 print("### BLOG LEAD CRAWLER — HARD FAIL SAFE VERSION RUNNING ###")
 
 # =========================
+# GLOBAL BROWSER HEADERS (MANDATORY 2026)
+# =========================
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/121.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+}
+
+session = requests.Session()
+session.headers.update(HEADERS)
+
+# =========================
 # APP INIT
 # =========================
 app = FastAPI(title="Blog Lead Crawler API", version="1.0.0")
@@ -95,7 +114,9 @@ def is_valid_post_url(url: str, domain: str) -> bool:
 def fetch_child_sitemap(sitemap_url: str) -> list:
     items = []
     try:
-        r = requests.get(sitemap_url, timeout=15, verify=False)
+        r = session.get(sitemap_url, timeout=15, verify=False)
+        if r.status_code != 200:
+            return []
         root = ET.fromstring(r.text)
         ns = {"ns": "http://www.sitemaps.org/schemas/sitemap/0.9"}
         for u in root.findall("ns:url", ns):
@@ -112,7 +133,7 @@ def fetch_sitemap_urls(blog_url: str) -> list:
 
     for path in sitemap_paths:
         try:
-            r = requests.get(blog_url + path, timeout=15, verify=False)
+            r = session.get(blog_url + path, timeout=15, verify=False)
             if r.status_code != 200:
                 continue
 
@@ -143,11 +164,9 @@ def fetch_sitemap_urls(blog_url: str) -> list:
 # FALLBACK DISCOVERY
 # =========================
 def fallback_discover_posts(blog_url: str, domain: str, limit=100):
-    headers = {"User-Agent": "Mozilla/5.0"}
     found = []
-
     try:
-        r = requests.get(blog_url, headers=headers, timeout=20, verify=False)
+        r = session.get(blog_url, timeout=20, verify=False)
         if r.status_code != 200:
             return []
 
@@ -168,11 +187,10 @@ def fallback_discover_posts(blog_url: str, domain: str, limit=100):
 # LINK EXTRACTION
 # =========================
 def extract_outbound_links(page_url: str) -> list:
-    headers = {"User-Agent": "Mozilla/5.0 (BlogLeadCrawler)"}
     links = []
 
     try:
-        r = requests.get(page_url, headers=headers, timeout=15, verify=False)
+        r = session.get(page_url, timeout=15, verify=False)
         if r.status_code >= 400:
             return []
 
