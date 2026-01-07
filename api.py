@@ -3,14 +3,11 @@ load_dotenv()
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
-from datetime import datetime, timedelta
+from datetime import datetime
 from pydantic import BaseModel
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
-import csv
-import io
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
@@ -79,17 +76,8 @@ def extract_domain(url: str) -> str:
 def is_casino_link(url: str) -> bool:
     return any(k in url.lower() for k in CASINO_KEYWORDS)
 
-def is_within_last_12_months(lastmod: str) -> bool:
-    if not lastmod:
-        return True
-    try:
-        d = datetime.fromisoformat(lastmod[:10])
-        return d >= datetime.utcnow() - timedelta(days=365)
-    except Exception:
-        return True
-
 # =========================================================
-# 🔴 ONLY FIX — REMOVE POST-SHAPE ASSUMPTION (FINAL)
+# FINAL POST LOGIC — NO URL SHAPE ASSUMPTIONS
 # =========================================================
 def is_valid_post_url(url: str, domain: str) -> bool:
     blacklist = [
@@ -102,7 +90,7 @@ def is_valid_post_url(url: str, domain: str) -> bool:
     )
 
 # =========================
-# SITEMAP
+# SITEMAP HANDLING
 # =========================
 def fetch_child_sitemap(sitemap_url: str) -> list:
     items = []
@@ -112,12 +100,8 @@ def fetch_child_sitemap(sitemap_url: str) -> list:
         ns = {"ns": "http://www.sitemaps.org/schemas/sitemap/0.9"}
         for u in root.findall("ns:url", ns):
             loc = u.find("ns:loc", ns)
-            lastmod = u.find("ns:lastmod", ns)
             if loc is not None:
-                items.append({
-                    "url": loc.text.strip(),
-                    "lastmod": lastmod.text.strip() if lastmod is not None else None
-                })
+                items.append({"url": loc.text.strip()})
     except Exception:
         pass
     return items
@@ -145,12 +129,8 @@ def fetch_sitemap_urls(blog_url: str) -> list:
 
             for u in root.findall("ns:url", ns):
                 loc = u.find("ns:loc", ns)
-                lastmod = u.find("ns:lastmod", ns)
                 if loc is not None:
-                    results.append({
-                        "url": loc.text.strip(),
-                        "lastmod": lastmod.text.strip() if lastmod is not None else None
-                    })
+                    results.append({"url": loc.text.strip()})
 
             if results:
                 return results
@@ -160,7 +140,7 @@ def fetch_sitemap_urls(blog_url: str) -> list:
     return results
 
 # =========================
-# 🔁 FALLBACK BLOG DISCOVERY
+# FALLBACK DISCOVERY
 # =========================
 def fallback_discover_posts(blog_url: str, domain: str, limit=100):
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -174,10 +154,9 @@ def fallback_discover_posts(blog_url: str, domain: str, limit=100):
         soup = BeautifulSoup(r.text, "html.parser")
 
         for a in soup.find_all("a", href=True):
-            full = urljoin(blog_url, a["href"])
-            if domain not in full:
-                continue
-            found.append(full.rstrip("/"))
+            full = urljoin(blog_url, a["href"]).rstrip("/")
+            if extract_domain(full) == domain:
+                found.append(full)
             if len(found) >= limit:
                 break
     except Exception:
@@ -257,6 +236,8 @@ def crawl_blog(data: CrawlRequest):
 
     cur.execute("SELECT 1 FROM blog_pages WHERE blog_url=%s", (blog_url,))
     if cur.fetchone():
+        cur.close()
+        conn.close()
         return {"status": "already_exists"}
 
     cur.execute("""
@@ -266,7 +247,7 @@ def crawl_blog(data: CrawlRequest):
 
     urls = fetch_sitemap_urls(blog_url)
     if not urls:
-        urls = [{"url": u, "lastmod": None} for u in fallback_discover_posts(blog_url, domain)]
+        urls = [{"url": u} for u in fallback_discover_posts(blog_url, domain)]
 
     inserted = 0
     for u in urls:
@@ -287,3 +268,56 @@ def crawl_blog(data: CrawlRequest):
     conn.close()
 
     return {"inserted_pages": inserted}
+
+@app.post("/crawl-links")
+def crawl_links(data: CrawlRequest):
+    blog_url = normalize_blog_url(data.blog_url)
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT id, blog_url
+        FROM blog_pages
+        WHERE COALESCE(is_root,FALSE)=FALSE
+        AND blog_url LIKE %s
+    """, (blog_url + "%",))
+    pages = cur.fetchall()
+
+    if not pages:
+        cur.close()
+        conn.close()
+        raise HTTPException(404, "Run /crawl first")
+
+    saved = casino = 0
+
+    for p in pages:
+        links = extract_outbound_links(p["blog_url"])
+        for l in links:
+            try:
+                is_c = is_casino_link(l["url"])
+                cur.execute("""
+                    INSERT INTO outbound_links
+                    (blog_page_id,url,is_casino,is_dofollow)
+                    VALUES (%s,%s,%s,%s)
+                    ON CONFLICT DO NOTHING
+                    RETURNING id
+                """, (p["id"], l["url"], is_c, l["is_dofollow"]))
+
+                if cur.fetchone():
+                    upsert_commercial_site(cur, l["url"], is_c)
+                    saved += 1
+                    casino += int(is_c)
+
+                conn.commit()
+            except Exception:
+                conn.rollback()
+
+    cur.close()
+    conn.close()
+
+    return {
+        "pages_scanned": len(pages),
+        "saved_links": saved,
+        "casino_links": casino
+    }
