@@ -3,14 +3,11 @@ load_dotenv()
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
 from datetime import datetime, timedelta
 from pydantic import BaseModel
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
-import csv
-import io
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
@@ -79,15 +76,6 @@ def extract_domain(url: str) -> str:
 def is_casino_link(url: str) -> bool:
     return any(k in url.lower() for k in CASINO_KEYWORDS)
 
-def is_within_last_12_months(lastmod: str) -> bool:
-    if not lastmod:
-        return True
-    try:
-        d = datetime.fromisoformat(lastmod[:10])
-        return d >= datetime.utcnow() - timedelta(days=365)
-    except Exception:
-        return True
-
 def is_valid_post_url(url: str, domain: str) -> bool:
     blacklist = ["/tag/", "/category/", "/author/", "/page/"]
     return domain in url and not any(b in url for b in blacklist)
@@ -151,55 +139,32 @@ def fetch_sitemap_urls(blog_url: str) -> list:
     return results
 
 # =========================
-# 🔁 FALLBACK BLOG DISCOVERY (HTML)
+# FALLBACK HTML DISCOVERY
 # =========================
 def fallback_discover_posts(blog_url: str, domain: str, limit=100):
-    headers = {"User-Agent": "Mozilla/5.0"}
     found = []
-
     try:
-        r = requests.get(blog_url, headers=headers, timeout=20, verify=False)
-        if r.status_code != 200:
-            return []
-
+        r = requests.get(blog_url, timeout=20, verify=False)
         soup = BeautifulSoup(r.text, "html.parser")
 
         for a in soup.find_all("a", href=True):
             full = urljoin(blog_url, a["href"])
-
-            if domain not in full:
-                continue
-
-            if any(x in full for x in ["/blog/", "/post/", "/202"]):
+            if domain in full and any(x in full for x in ["/blog/", "/post/", "/202"]):
                 found.append(full.rstrip("/"))
-
             if len(found) >= limit:
                 break
-
     except Exception:
         pass
 
     return list(set(found))
 
 # =========================
-# 🔒 HARD FAIL SAFE LINK EXTRACTION
+# OUTBOUND LINKS
 # =========================
 def extract_outbound_links(page_url: str) -> list:
-    headers = {"User-Agent": "Mozilla/5.0 (BlogLeadCrawler)"}
     links = []
-
     try:
-        r = requests.get(
-            page_url,
-            headers=headers,
-            timeout=15,
-            verify=False,
-            allow_redirects=True
-        )
-
-        if r.status_code >= 400:
-            return []
-
+        r = requests.get(page_url, timeout=15, verify=False)
         if not r.headers.get("content-type", "").startswith("text/html"):
             return []
 
@@ -210,7 +175,6 @@ def extract_outbound_links(page_url: str) -> list:
             full = urljoin(page_url, a["href"])
             if not full.startswith("http"):
                 continue
-
             if urlparse(full).netloc == base_domain:
                 continue
 
@@ -221,7 +185,6 @@ def extract_outbound_links(page_url: str) -> list:
                 "url": full,
                 "is_dofollow": is_dofollow
             })
-
     except Exception:
         return []
 
@@ -254,22 +217,6 @@ class CrawlRequest(BaseModel):
 def health():
     return {"status": "ok"}
 
-@app.get("/history")
-def history():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT blog_url, first_crawled
-        FROM blog_pages
-        WHERE COALESCE(is_root,FALSE)=TRUE
-        ORDER BY first_crawled DESC
-        LIMIT 50
-    """)
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return rows
-
 @app.post("/crawl")
 def crawl_blog(data: CrawlRequest):
     blog_url = normalize_blog_url(data.blog_url)
@@ -289,10 +236,8 @@ def crawl_blog(data: CrawlRequest):
     """, (blog_url, now))
 
     urls = fetch_sitemap_urls(blog_url)
-
-    # 🔁 FALLBACK IF SITEMAP EMPTY
     if not urls:
-        urls = [{"url": u, "lastmod": None} for u in fallback_discover_posts(blog_url, domain)]
+        urls = [{"url": u} for u in fallback_discover_posts(blog_url, domain)]
 
     inserted = 0
     for u in urls:
@@ -311,9 +256,11 @@ def crawl_blog(data: CrawlRequest):
     conn.commit()
     cur.close()
     conn.close()
-
     return {"inserted_pages": inserted}
 
+# =========================
+# 🔴 FIXED ENDPOINT
+# =========================
 @app.post("/crawl-links")
 def crawl_links(data: CrawlRequest):
     blog_url = normalize_blog_url(data.blog_url)
@@ -335,19 +282,34 @@ def crawl_links(data: CrawlRequest):
     saved = casino = 0
 
     for p in pages:
-        for l in extract_outbound_links(p["blog_url"]):
-            is_c = is_casino_link(l["url"])
-            cur.execute("""
-                INSERT INTO outbound_links
-                (blog_page_id,url,is_casino,is_dofollow)
-                VALUES (%s,%s,%s,%s)
-                ON CONFLICT DO NOTHING
-                RETURNING id
-            """, (p["id"], l["url"], is_c, l["is_dofollow"]))
-            if cur.fetchone():
-                upsert_commercial_site(cur, l["url"], is_c)
-                saved += 1
-                casino += int(is_c)
+        try:
+            links = extract_outbound_links(p["blog_url"])
+            if not links:
+                continue
+
+            for l in links:
+                try:
+                    is_c = is_casino_link(l["url"])
+                    cur.execute("""
+                        INSERT INTO outbound_links
+                        (blog_page_id,url,is_casino,is_dofollow)
+                        VALUES (%s,%s,%s,%s)
+                        ON CONFLICT DO NOTHING
+                        RETURNING id
+                    """, (p["id"], l["url"], is_c, l["is_dofollow"]))
+
+                    if cur.fetchone():
+                        upsert_commercial_site(cur, l["url"], is_c)
+                        saved += 1
+                        casino += int(is_c)
+
+                except Exception:
+                    conn.rollback()
+                    continue
+
+        except Exception:
+            conn.rollback()
+            continue
 
     conn.commit()
     cur.close()
