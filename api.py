@@ -32,6 +32,7 @@ HEADERS = {
     "Accept-Encoding": "gzip, deflate, br",
     "Connection": "keep-alive",
     "Upgrade-Insecure-Requests": "1",
+    "Referer": "https://www.google.com/"
 }
 
 session = requests.Session()
