@@ -11,7 +11,6 @@ from psycopg2.extras import RealDictCursor
 import os
 import csv
 import io
-
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
@@ -152,24 +151,26 @@ def fetch_sitemap_urls(blog_url: str) -> list:
     return results
 
 # =========================
-# 🔒 SAFE LINK EXTRACTION (MANDATORY FIX)
+# 🔒 SAFE LINK EXTRACTION
 # =========================
-def extract_outbound_links(page_url: str):
+def extract_outbound_links(page_url: str) -> list:
     headers = {"User-Agent": "Mozilla/5.0"}
     links = []
 
     try:
         r = requests.get(page_url, headers=headers, timeout=20, verify=False)
-
         if r.status_code != 200:
-            print(f"[SKIP] {page_url} → {r.status_code}")
             return []
 
         soup = BeautifulSoup(r.text, "html.parser")
         base_domain = urlparse(page_url).netloc
 
         for a in soup.find_all("a", href=True):
-            full = urljoin(page_url, a["href"])
+            href = a.get("href", "").strip()
+            if not href:
+                continue
+
+            full = urljoin(page_url, href)
             if not full.startswith("http"):
                 continue
 
@@ -187,7 +188,7 @@ def extract_outbound_links(page_url: str):
     except Exception as e:
         print(f"[FAILED PAGE] {page_url} → {str(e)}")
 
-    return links
+    return list({l["url"]: l for l in links}.values())
 
 def upsert_commercial_site(cur, url, is_casino):
     domain = extract_domain(url)
@@ -224,7 +225,7 @@ def history():
         cur.execute("""
             SELECT blog_url, first_crawled
             FROM blog_pages
-            WHERE is_root = TRUE
+            WHERE COALESCE(is_root, FALSE) = TRUE
               AND first_crawled >= NOW() - INTERVAL '30 days'
             ORDER BY first_crawled DESC
         """)
@@ -283,10 +284,13 @@ def crawl_links(data: CrawlRequest):
     cur = conn.cursor()
     try:
         cur.execute("""
-            SELECT id, blog_url FROM blog_pages
-            WHERE is_root = FALSE AND blog_url LIKE %s
+            SELECT id, blog_url
+            FROM blog_pages
+            WHERE COALESCE(is_root, FALSE) = FALSE
+              AND blog_url LIKE %s
         """, (blog_url + "%",))
         pages = cur.fetchall()
+
         if not pages:
             raise HTTPException(404, "Run /crawl first")
 
@@ -294,20 +298,28 @@ def crawl_links(data: CrawlRequest):
         casino = 0
 
         for p in pages:
-            links = extract_outbound_links(p["blog_url"])
-            for l in links:
-                is_c = is_casino_link(l["url"])
-                casino += int(is_c)
+            try:
+                links = extract_outbound_links(p["blog_url"])
+                if not links:
+                    continue
 
-                cur.execute("""
-                    INSERT INTO outbound_links
-                    (blog_page_id, url, is_casino, is_dofollow)
-                    VALUES (%s,%s,%s,%s)
-                    ON CONFLICT DO NOTHING
-                """, (p["id"], l["url"], is_c, l["is_dofollow"]))
+                for l in links:
+                    is_c = is_casino_link(l["url"])
+                    casino += int(is_c)
 
-                upsert_commercial_site(cur, l["url"], is_c)
-                saved += 1
+                    cur.execute("""
+                        INSERT INTO outbound_links
+                        (blog_page_id, url, is_casino, is_dofollow)
+                        VALUES (%s,%s,%s,%s)
+                        ON CONFLICT DO NOTHING
+                    """, (p["id"], l["url"], is_c, l["is_dofollow"]))
+
+                    upsert_commercial_site(cur, l["url"], is_c)
+                    saved += 1
+
+            except Exception as e:
+                print("[PAGE FAILED]", p["blog_url"], str(e))
+                continue
 
         conn.commit()
         return {"saved_links": saved, "casino_links": casino}
