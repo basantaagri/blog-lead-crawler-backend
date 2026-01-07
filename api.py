@@ -188,6 +188,7 @@ def extract_outbound_links(page_url: str) -> list:
     except Exception as e:
         print(f"[FAILED PAGE] {page_url} → {str(e)}")
 
+    # de-duplicate per page
     return list({l["url"]: l for l in links}.values())
 
 def upsert_commercial_site(cur, url, is_casino):
@@ -276,6 +277,9 @@ def crawl_blog(data: CrawlRequest):
         cur.close()
         conn.close()
 
+# =========================
+# 🚨 FIXED /crawl-links (IMPORTANT)
+# =========================
 @app.post("/crawl-links")
 def crawl_links(data: CrawlRequest):
     blog_url = normalize_blog_url(data.blog_url)
@@ -298,28 +302,26 @@ def crawl_links(data: CrawlRequest):
         casino = 0
 
         for p in pages:
-            try:
-                links = extract_outbound_links(p["blog_url"])
-                if not links:
-                    continue
+            links = extract_outbound_links(p["blog_url"])
+            if not links:
+                continue
 
-                for l in links:
-                    is_c = is_casino_link(l["url"])
-                    casino += int(is_c)
+            for l in links:
+                is_c = is_casino_link(l["url"])
+                casino += int(is_c)
 
-                    cur.execute("""
-                        INSERT INTO outbound_links
-                        (blog_page_id, url, is_casino, is_dofollow)
-                        VALUES (%s,%s,%s,%s)
-                        ON CONFLICT DO NOTHING
-                    """, (p["id"], l["url"], is_c, l["is_dofollow"]))
+                cur.execute("""
+                    INSERT INTO outbound_links
+                    (blog_page_id, url, is_casino, is_dofollow)
+                    VALUES (%s,%s,%s,%s)
+                    ON CONFLICT DO NOTHING
+                    RETURNING id
+                """, (p["id"], l["url"], is_c, l["is_dofollow"]))
 
+                inserted = cur.fetchone()
+                if inserted:
                     upsert_commercial_site(cur, l["url"], is_c)
                     saved += 1
-
-            except Exception as e:
-                print("[PAGE FAILED]", p["blog_url"], str(e))
-                continue
 
         conn.commit()
         return {"saved_links": saved, "casino_links": casino}
