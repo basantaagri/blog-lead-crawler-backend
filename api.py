@@ -22,7 +22,10 @@ print("### BLOG LEAD CRAWLER — FINAL VERSION RUNNING ###")
 # =========================
 # APP INIT
 # =========================
-app = FastAPI(title="Blog Lead Crawler API", version="1.0.0")
+app = FastAPI(
+    title="Blog Lead Crawler API",
+    version="1.0.0"
+)
 
 # =========================
 # CORS
@@ -92,6 +95,9 @@ def extract_domain(url: str) -> str:
 def is_casino_link(url: str) -> bool:
     return any(k in url.lower() for k in CASINO_KEYWORDS)
 
+# =========================
+# SITEMAP FETCH
+# =========================
 def fetch_child_sitemap(sitemap_url: str) -> list:
     results = []
     try:
@@ -116,7 +122,7 @@ def fetch_sitemap_urls(blog_url: str) -> list:
     sitemap_paths = ["/sitemap.xml", "/post-sitemap.xml", "/wp-sitemap.xml"]
     results = []
 
-    for path in sitemap_paths:  # ✅ FIXED HERE
+    for path in sitemap_paths:  # ✅ REQUIRED FIX
         try:
             r = requests.get(blog_url + path, timeout=15, verify=False)
             if r.status_code != 200:
@@ -150,6 +156,9 @@ def fetch_sitemap_urls(blog_url: str) -> list:
 
     return results
 
+# =========================
+# LINK EXTRACTION
+# =========================
 def extract_outbound_links(page_url: str):
     headers = {"User-Agent": "Mozilla/5.0"}
     r = requests.get(page_url, headers=headers, timeout=20, verify=False)
@@ -187,7 +196,10 @@ def upsert_commercial_site(cur, link_url, is_dofollow, is_casino):
     cur.execute("""
         UPDATE commercial_sites
         SET total_links = total_links + 1,
-            is_casino = CASE WHEN is_casino OR %s THEN TRUE ELSE FALSE END
+            is_casino = CASE
+                WHEN is_casino OR %s THEN TRUE
+                ELSE FALSE
+            END
         WHERE commercial_domain = %s
     """, (is_casino, domain))
 
@@ -205,7 +217,7 @@ def health():
     return {"status": "ok"}
 
 # =========================
-# FINAL /crawl
+# /crawl
 # =========================
 @app.post("/crawl")
 def crawl_blog(data: CrawlRequest):
@@ -247,6 +259,54 @@ def crawl_blog(data: CrawlRequest):
 
         conn.commit()
         return {"status": "inserted", "blog": blog_url, "blog_posts_added": inserted}
+
+    finally:
+        cur.close()
+        conn.close()
+
+# =========================
+# /crawl-links
+# =========================
+@app.post("/crawl-links")
+def crawl_links(data: CrawlRequest):
+    blog_url = normalize_blog_url(data.blog_url)
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    try:
+        cur.execute("""
+            SELECT id, blog_url
+            FROM blog_pages
+            WHERE is_root = FALSE
+              AND blog_url LIKE %s
+        """, (blog_url + "%",))
+
+        pages = cur.fetchall()
+        if not pages:
+            raise HTTPException(status_code=404, detail="Run /crawl first")
+
+        saved = 0
+        casino_count = 0
+
+        for p in pages:
+            links = extract_outbound_links(p["blog_url"])
+            for l in links:
+                casino = is_casino_link(l["url"])
+                casino_count += int(casino)
+
+                cur.execute("""
+                    INSERT INTO outbound_links
+                    (blog_page_id, url, is_casino, is_dofollow)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT DO NOTHING
+                """, (p["id"], l["url"], casino, l["is_dofollow"]))
+
+                upsert_commercial_site(cur, l["url"], l["is_dofollow"], casino)
+                saved += 1
+
+        conn.commit()
+        return {"saved_new_links": saved, "casino_links": casino_count}
 
     finally:
         cur.close()
