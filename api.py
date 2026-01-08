@@ -4,20 +4,15 @@ load_dotenv()
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from datetime import datetime
 from pydantic import BaseModel
+from datetime import datetime
 import psycopg2
 from psycopg2.extras import RealDictCursor
-import os
-import requests
+import os, requests, csv, io, time, random
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 import xml.etree.ElementTree as ET
 import urllib3
-import time
-import random
-import csv
-import io
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -39,7 +34,7 @@ session.headers.update(HEADERS)
 # =========================
 # APP INIT
 # =========================
-app = FastAPI(title="Blog Lead Crawler API", version="1.2.2")
+app = FastAPI(title="Blog Lead Crawler API", version="1.2.3")
 
 # =========================
 # CORS
@@ -178,7 +173,7 @@ def upsert_commercial_site(cur, url, is_casino):
     """, (is_casino, domain))
 
 # =========================
-# CSV INLINE (NO DOWNLOAD)
+# CSV INLINE
 # =========================
 def rows_to_csv(rows):
     buf = io.StringIO()
@@ -202,98 +197,6 @@ class CrawlRequest(BaseModel):
 def health():
     return {"status": "ok"}
 
-@app.post("/crawl")
-def crawl_blog(data: CrawlRequest):
-    blog_url = normalize_blog_url(data.blog_url)
-    domain = extract_domain(blog_url)
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("SELECT 1 FROM blog_pages WHERE blog_url=%s", (blog_url,))
-    if cur.fetchone():
-        return {"status": "already_exists"}
-
-    cur.execute("""
-        INSERT INTO blog_pages (blog_url, first_crawled, is_root)
-        VALUES (%s, NOW(), TRUE)
-    """, (blog_url,))
-
-    urls = fetch_sitemap_urls(blog_url) or [
-        {"url": u} for u in fallback_discover_posts(blog_url, domain)
-    ]
-
-    for u in urls[:MAX_PAGES]:
-        if is_valid_post_url(u["url"], domain):
-            cur.execute("""
-                INSERT INTO blog_pages (blog_url, first_crawled, is_root)
-                VALUES (%s, NOW(), FALSE)
-                ON CONFLICT DO NOTHING
-            """, (u["url"],))
-
-    conn.commit()
-    cur.close()
-    conn.close()
-    return {"inserted_pages": len(urls)}
-
-@app.post("/crawl-links")
-def crawl_links(data: CrawlRequest):
-    blog_url = normalize_blog_url(data.blog_url)
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT id, blog_url
-        FROM blog_pages
-        WHERE is_root = FALSE
-        AND blog_url LIKE %s
-    """, (blog_url + "%",))
-
-    pages = cur.fetchall()
-    if not pages:
-        raise HTTPException(404, "Run /crawl first")
-
-    saved = casino = blocked = 0
-
-    for p in pages:
-        time.sleep(random.uniform(1.2, 2.2))
-        result = extract_outbound_links(p["blog_url"])
-
-        if result == "BLOCKED":
-            blocked += 1
-            continue
-
-        for l in result:
-            is_c = is_casino_link(l["url"])
-            cur.execute("""
-                INSERT INTO outbound_links
-                (blog_page_id, url, is_casino, is_dofollow)
-                VALUES (%s,%s,%s,%s)
-                ON CONFLICT DO NOTHING
-                RETURNING id
-            """, (p["id"], l["url"], is_c, l["is_dofollow"]))
-
-            if cur.fetchone():
-                upsert_commercial_site(cur, l["url"], is_c)
-                saved += 1
-                casino += int(is_c)
-
-        conn.commit()
-
-    cur.close()
-    conn.close()
-
-    return {
-        "pages_scanned": len(pages),
-        "saved_links": saved,
-        "casino_links": casino,
-        "blocked_pages": blocked
-    }
-
-# =========================
-# FRONTEND SUPPORT
-# =========================
 @app.get("/history")
 def history():
     conn = get_db()
@@ -310,20 +213,39 @@ def history():
     conn.close()
     return rows
 
+# =========================
+# ✅ FIXED LEAD SCORE API
+# =========================
 @app.get("/blog-lead-score/{blog_id}")
 def blog_lead_score(blog_id: int):
     conn = get_db()
     cur = conn.cursor()
+
+    cur.execute("""
+        SELECT blog_url
+        FROM blog_pages
+        WHERE id = %s AND is_root = TRUE
+    """, (blog_id,))
+    root = cur.fetchone()
+
+    if not root:
+        cur.close()
+        conn.close()
+        raise HTTPException(404, "Blog not found")
+
+    root_url = root["blog_url"]
+
     cur.execute("""
         SELECT
-            COUNT(ol.id) total_links,
-            SUM(CASE WHEN ol.is_casino THEN 1 ELSE 0 END) casino,
-            SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END) dofollow
-        FROM blog_pages root
-        JOIN blog_pages bp ON bp.blog_url LIKE root.blog_url || '%'
+            COUNT(ol.id) AS total_links,
+            SUM(CASE WHEN ol.is_casino THEN 1 ELSE 0 END) AS casino,
+            SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END) AS dofollow
+        FROM blog_pages bp
         LEFT JOIN outbound_links ol ON ol.blog_page_id = bp.id
-        WHERE root.id = %s
-    """, (blog_id,))
+        WHERE bp.is_root = FALSE
+        AND bp.blog_url LIKE %s
+    """, (root_url + "%",))
+
     r = cur.fetchone() or {}
     cur.close()
     conn.close()
@@ -338,53 +260,3 @@ def blog_lead_score(blog_id: int):
         "dofollow_percentage": round((dofollow / total) * 100, 2) if total else 0,
         "lead_score": min(100, max(0, int(dofollow - casino)))
     }
-
-# =========================
-# CSV INLINE VIEWS
-# =========================
-@app.get("/export/blog-page-links")
-def export_blog_page_links():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT bp.blog_url, ol.url, ol.is_dofollow, ol.is_casino
-        FROM outbound_links ol
-        JOIN blog_pages bp ON bp.id = ol.blog_page_id
-    """)
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return rows_to_csv(rows)
-
-@app.get("/export/commercial-sites")
-def export_commercial_sites():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM commercial_sites ORDER BY total_links DESC")
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return rows_to_csv(rows)
-
-@app.get("/export/blog-summary")
-def export_blog_summary():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT
-            root.blog_url AS blog,
-            COUNT(DISTINCT cs.commercial_domain) commercial_sites,
-            COUNT(ol.id) total_links,
-            SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END) dofollow_links,
-            SUM(CASE WHEN ol.is_casino THEN 1 ELSE 0 END) casino_links
-        FROM blog_pages root
-        JOIN blog_pages bp ON bp.blog_url LIKE root.blog_url || '%'
-        LEFT JOIN outbound_links ol ON ol.blog_page_id = bp.id
-        LEFT JOIN commercial_sites cs ON cs.commercial_domain = split_part(ol.url,'/',3)
-        WHERE root.is_root = TRUE
-        GROUP BY root.blog_url
-    """)
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return rows_to_csv(rows)
