@@ -3,6 +3,7 @@ load_dotenv()
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from datetime import datetime
 from pydantic import BaseModel
 import psycopg2
@@ -15,6 +16,8 @@ import xml.etree.ElementTree as ET
 import urllib3
 import time
 import random
+import csv
+import io
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -43,7 +46,7 @@ session.headers.update(HEADERS)
 # =========================
 # APP INIT
 # =========================
-app = FastAPI(title="Blog Lead Crawler API", version="1.1.0")
+app = FastAPI(title="Blog Lead Crawler API", version="1.2.0")
 
 # =========================
 # CORS
@@ -119,27 +122,11 @@ def is_valid_post_url(url: str, domain: str) -> bool:
 # =========================
 # SITEMAP HANDLING
 # =========================
-def fetch_child_sitemap(sitemap_url: str) -> list:
-    items = []
-    try:
-        r = session.get(sitemap_url, timeout=15, verify=False)
-        if r.status_code != 200:
-            return []
-        root = ET.fromstring(r.text)
-        ns = {"ns": "http://www.sitemaps.org/schemas/sitemap/0.9"}
-        for u in root.findall("ns:url", ns):
-            loc = u.find("ns:loc", ns)
-            if loc is not None:
-                items.append({"url": loc.text.strip()})
-    except Exception:
-        pass
-    return items
-
 def fetch_sitemap_urls(blog_url: str) -> list:
-    sitemap_paths = ["/sitemap.xml", "/post-sitemap.xml", "/wp-sitemap.xml"]
-    for path in sitemap_paths:
+    paths = ["/sitemap.xml", "/post-sitemap.xml", "/wp-sitemap.xml"]
+    for p in paths:
         try:
-            r = session.get(blog_url + path, timeout=15, verify=False)
+            r = session.get(blog_url + p, timeout=15, verify=False)
             if r.status_code != 200:
                 continue
             root = ET.fromstring(r.text)
@@ -176,7 +163,7 @@ def fallback_discover_posts(blog_url: str, domain: str, limit=100):
     return list(set(found))
 
 # =========================
-# LINK EXTRACTION (WITH BLOCK DETECTION)
+# LINK EXTRACTION
 # =========================
 def extract_outbound_links(page_url: str):
     try:
@@ -188,9 +175,6 @@ def extract_outbound_links(page_url: str):
 
         if any(sig in html for sig in BLOCK_SIGNATURES):
             return "BLOCKED"
-
-        if not r.headers.get("content-type", "").startswith("text/html"):
-            return []
 
         soup = BeautifulSoup(r.text, "html.parser")
         base_domain = urlparse(page_url).netloc
@@ -226,6 +210,22 @@ def upsert_commercial_site(cur, url, is_casino):
     """, (is_casino, domain))
 
 # =========================
+# CSV HELPER
+# =========================
+def rows_to_csv(rows, filename):
+    output = io.StringIO()
+    if rows:
+        writer = csv.DictWriter(output, fieldnames=rows[0].keys())
+        writer.writeheader()
+        writer.writerows(rows)
+    output.seek(0)
+    return StreamingResponse(
+        output,
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+# =========================
 # MODELS
 # =========================
 class CrawlRequest(BaseModel):
@@ -249,8 +249,6 @@ def crawl_blog(data: CrawlRequest):
 
     cur.execute("SELECT 1 FROM blog_pages WHERE blog_url=%s", (blog_url,))
     if cur.fetchone():
-        cur.close()
-        conn.close()
         return {"status": "already_exists"}
 
     cur.execute("""
@@ -260,29 +258,23 @@ def crawl_blog(data: CrawlRequest):
 
     urls = fetch_sitemap_urls(blog_url) or [{"url": u} for u in fallback_discover_posts(blog_url, domain)]
 
-    inserted = 0
-    for u in urls:
-        if inserted >= MAX_PAGES:
-            break
-        if not is_valid_post_url(u["url"], domain):
-            continue
-        cur.execute("""
-            INSERT INTO blog_pages (blog_url, first_crawled, is_root)
-            VALUES (%s,%s,FALSE)
-            ON CONFLICT DO NOTHING
-        """, (u["url"], now))
-        inserted += 1
+    for u in urls[:MAX_PAGES]:
+        if is_valid_post_url(u["url"], domain):
+            cur.execute("""
+                INSERT INTO blog_pages (blog_url, first_crawled, is_root)
+                VALUES (%s,%s,FALSE)
+                ON CONFLICT DO NOTHING
+            """, (u["url"], now))
 
     conn.commit()
     cur.close()
     conn.close()
 
-    return {"inserted_pages": inserted}
+    return {"inserted_pages": len(urls)}
 
 @app.post("/crawl-links")
 def crawl_links(data: CrawlRequest):
     blog_url = normalize_blog_url(data.blog_url)
-
     conn = get_db()
     cur = conn.cursor()
 
@@ -300,16 +292,11 @@ def crawl_links(data: CrawlRequest):
     saved = casino = blocked = 0
 
     for p in pages:
-        time.sleep(random.uniform(1.2, 2.5))  # pacing
+        time.sleep(random.uniform(1.2, 2.5))
         result = extract_outbound_links(p["blog_url"])
 
         if result == "BLOCKED":
             blocked += 1
-            cur.execute("""
-                UPDATE blog_pages SET crawl_status='blocked'
-                WHERE id=%s
-            """, (p["id"],))
-            conn.commit()
             continue
 
         for l in result:
@@ -339,3 +326,53 @@ def crawl_links(data: CrawlRequest):
         "blocked_pages": blocked,
         "crawl_mode": "cloud_partial"
     }
+
+# =========================
+# CSV EXPORTS
+# =========================
+@app.get("/export/blog-page-links")
+def export_blog_page_links():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT bp.blog_url, ol.url, ol.is_dofollow, ol.is_casino
+        FROM outbound_links ol
+        JOIN blog_pages bp ON bp.id = ol.blog_page_id
+    """)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows_to_csv(rows, "blog_page_links.csv")
+
+@app.get("/export/commercial-sites")
+def export_commercial_sites():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM commercial_sites ORDER BY total_links DESC")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows_to_csv(rows, "commercial_sites.csv")
+
+@app.get("/export/blog-summary")
+def export_blog_summary():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT
+            root.blog_url AS blog,
+            COUNT(DISTINCT cs.commercial_domain) AS commercial_sites,
+            COUNT(ol.id) AS total_links,
+            SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END) AS dofollow_links,
+            SUM(CASE WHEN ol.is_casino THEN 1 ELSE 0 END) AS casino_links
+        FROM blog_pages root
+        JOIN blog_pages bp ON bp.blog_url LIKE root.blog_url || '%'
+        LEFT JOIN outbound_links ol ON ol.blog_page_id = bp.id
+        LEFT JOIN commercial_sites cs ON cs.commercial_domain = split_part(ol.url,'/',3)
+        WHERE root.is_root = TRUE
+        GROUP BY root.blog_url
+    """)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows_to_csv(rows, "blog_summary.csv")
