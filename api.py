@@ -18,9 +18,9 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 print("### BLOG LEAD CRAWLER — HARD FAIL SAFE VERSION RUNNING ###")
 
-# =========================
-# GLOBAL HEADERS
-# =========================
+# =========================================================
+# GLOBAL HEADERS (SAFE, CLOUD-FRIENDLY)
+# =========================================================
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
     "Accept": "text/html,application/xhtml+xml",
@@ -31,14 +31,14 @@ HEADERS = {
 session = requests.Session()
 session.headers.update(HEADERS)
 
-# =========================
+# =========================================================
 # APP INIT
-# =========================
+# =========================================================
 app = FastAPI(title="Blog Lead Crawler API", version="1.2.3")
 
-# =========================
+# =========================================================
 # CORS
-# =========================
+# =========================================================
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -50,9 +50,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# =========================
+# =========================================================
 # DATABASE
-# =========================
+# =========================================================
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL not found")
@@ -64,9 +64,9 @@ def get_db():
         sslmode="require"
     )
 
-# =========================
+# =========================================================
 # CONSTANTS
-# =========================
+# =========================================================
 MAX_PAGES = 1000
 
 CASINO_KEYWORDS = [
@@ -81,57 +81,60 @@ BLOCK_SIGNATURES = [
     "access denied"
 ]
 
-# =========================
+# =========================================================
 # HELPERS
-# =========================
-def normalize_blog_url(url):
+# =========================================================
+def normalize_blog_url(url: str) -> str:
     if not url.startswith("http"):
         url = "https://" + url
     return url.rstrip("/")
 
-def extract_domain(url):
+def extract_domain(url: str) -> str:
     return urlparse(url).netloc.lower().replace("www.", "")
 
-def is_casino_link(url):
+def is_casino_link(url: str) -> bool:
     return any(k in url.lower() for k in CASINO_KEYWORDS)
 
-def is_valid_post_url(url, domain):
+def is_valid_post_url(url: str, domain: str) -> bool:
     blacklist = ["/tag/", "/category/", "/author/", "/page/", "/feed"]
     return extract_domain(url) == domain and not any(b in url for b in blacklist)
 
-# =========================
-# SITEMAP
-# =========================
-def fetch_sitemap_urls(blog_url):
+# =========================================================
+# SITEMAP DISCOVERY
+# =========================================================
+def fetch_sitemap_urls(blog_url: str):
     for path in ["/sitemap.xml", "/post-sitemap.xml", "/wp-sitemap.xml"]:
         try:
             r = session.get(blog_url + path, timeout=15)
             if r.status_code != 200:
                 continue
+
             root = ET.fromstring(r.text)
             ns = {"ns": "http://www.sitemaps.org/schemas/sitemap/0.9"}
-            return [{"url": loc.text} for loc in root.findall(".//ns:loc", ns)]
+            return [{"url": loc.text.strip()} for loc in root.findall(".//ns:loc", ns)]
         except:
             continue
     return []
 
-def fallback_discover_posts(blog_url, domain):
+def fallback_discover_posts(blog_url: str, domain: str):
     try:
         r = session.get(blog_url, timeout=20)
         soup = BeautifulSoup(r.text, "html.parser")
         urls = []
+
         for a in soup.find_all("a", href=True):
             full = urljoin(blog_url, a["href"])
             if extract_domain(full) == domain:
                 urls.append(full)
+
         return list(set(urls))[:100]
     except:
         return []
 
-# =========================
+# =========================================================
 # LINK EXTRACTION
-# =========================
-def extract_outbound_links(page_url):
+# =========================================================
+def extract_outbound_links(page_url: str):
     try:
         r = session.get(page_url, timeout=15)
         html = r.text.lower()
@@ -140,12 +143,12 @@ def extract_outbound_links(page_url):
             return "BLOCKED"
 
         soup = BeautifulSoup(r.text, "html.parser")
-        base = extract_domain(page_url)
+        base_domain = extract_domain(page_url)
         links = []
 
         for a in soup.find_all("a", href=True):
             full = urljoin(page_url, a["href"])
-            if extract_domain(full) == base:
+            if extract_domain(full) == base_domain:
                 continue
 
             rel = " ".join(a.get("rel", [])).lower()
@@ -160,11 +163,13 @@ def extract_outbound_links(page_url):
 
 def upsert_commercial_site(cur, url, is_casino):
     domain = extract_domain(url)
+
     cur.execute("""
         INSERT INTO commercial_sites (commercial_domain, total_links, is_casino)
         VALUES (%s, 0, FALSE)
         ON CONFLICT (commercial_domain) DO NOTHING
     """, (domain,))
+
     cur.execute("""
         UPDATE commercial_sites
         SET total_links = total_links + 1,
@@ -172,9 +177,9 @@ def upsert_commercial_site(cur, url, is_casino):
         WHERE commercial_domain = %s
     """, (is_casino, domain))
 
-# =========================
-# CSV INLINE
-# =========================
+# =========================================================
+# CSV INLINE (NO AUTO DOWNLOAD)
+# =========================================================
 def rows_to_csv(rows):
     buf = io.StringIO()
     if rows:
@@ -184,15 +189,15 @@ def rows_to_csv(rows):
     buf.seek(0)
     return StreamingResponse(buf, media_type="text/csv")
 
-# =========================
+# =========================================================
 # MODELS
-# =========================
+# =========================================================
 class CrawlRequest(BaseModel):
     blog_url: str
 
-# =========================
+# =========================================================
 # ROUTES
-# =========================
+# =========================================================
 @app.get("/")
 def health():
     return {"status": "ok"}
@@ -213,9 +218,9 @@ def history():
     conn.close()
     return rows
 
-# =========================
-# ✅ FIXED LEAD SCORE API
-# =========================
+# =========================================================
+# ✅ FIXED LEAD SCORE (DOMAIN-SAFE)
+# =========================================================
 @app.get("/blog-lead-score/{blog_id}")
 def blog_lead_score(blog_id: int):
     conn = get_db()
@@ -233,7 +238,7 @@ def blog_lead_score(blog_id: int):
         conn.close()
         raise HTTPException(404, "Blog not found")
 
-    root_url = root["blog_url"]
+    root_domain = extract_domain(root["blog_url"])
 
     cur.execute("""
         SELECT
@@ -244,7 +249,7 @@ def blog_lead_score(blog_id: int):
         LEFT JOIN outbound_links ol ON ol.blog_page_id = bp.id
         WHERE bp.is_root = FALSE
         AND bp.blog_url LIKE %s
-    """, (root_url + "%",))
+    """, (f"%{root_domain}%",))
 
     r = cur.fetchone() or {}
     cur.close()
