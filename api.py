@@ -46,7 +46,7 @@ session.headers.update(HEADERS)
 # =========================
 # APP INIT
 # =========================
-app = FastAPI(title="Blog Lead Crawler API", version="1.2.0")
+app = FastAPI(title="Blog Lead Crawler API", version="1.2.1")
 
 # =========================
 # CORS
@@ -210,20 +210,16 @@ def upsert_commercial_site(cur, url, is_casino):
     """, (is_casino, domain))
 
 # =========================
-# CSV HELPER
+# CSV HELPER (NO AUTO DOWNLOAD)
 # =========================
-def rows_to_csv(rows, filename):
+def rows_to_csv(rows):
     output = io.StringIO()
     if rows:
         writer = csv.DictWriter(output, fieldnames=rows[0].keys())
         writer.writeheader()
         writer.writerows(rows)
     output.seek(0)
-    return StreamingResponse(
-        output,
-        media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={filename}"}
-    )
+    return StreamingResponse(output, media_type="text/csv")
 
 # =========================
 # MODELS
@@ -328,7 +324,7 @@ def crawl_links(data: CrawlRequest):
     }
 
 # =========================
-# CSV EXPORTS
+# CSV EXPORTS (INLINE VIEW)
 # =========================
 @app.get("/export/blog-page-links")
 def export_blog_page_links():
@@ -342,7 +338,7 @@ def export_blog_page_links():
     rows = cur.fetchall()
     cur.close()
     conn.close()
-    return rows_to_csv(rows, "blog_page_links.csv")
+    return rows_to_csv(rows)
 
 @app.get("/export/commercial-sites")
 def export_commercial_sites():
@@ -352,7 +348,7 @@ def export_commercial_sites():
     rows = cur.fetchall()
     cur.close()
     conn.close()
-    return rows_to_csv(rows, "commercial_sites.csv")
+    return rows_to_csv(rows)
 
 @app.get("/export/blog-summary")
 def export_blog_summary():
@@ -375,4 +371,4 @@ def export_blog_summary():
     rows = cur.fetchall()
     cur.close()
     conn.close()
-    return rows_to_csv(rows, "blog_summary.csv")
+    return rows_to_csv(rows)
