@@ -19,7 +19,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 print("### BLOG LEAD CRAWLER — HARD FAIL SAFE VERSION RUNNING ###")
 
 # =========================================================
-# GLOBAL HEADERS (SAFE, CLOUD-FRIENDLY)
+# GLOBAL HEADERS
 # =========================================================
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
@@ -178,7 +178,7 @@ def upsert_commercial_site(cur, url, is_casino):
     """, (is_casino, domain))
 
 # =========================================================
-# CSV INLINE (NO AUTO DOWNLOAD)
+# CSV INLINE
 # =========================================================
 def rows_to_csv(rows):
     buf = io.StringIO()
@@ -219,7 +219,7 @@ def history():
     return rows
 
 # =========================================================
-# ✅ FIXED LEAD SCORE (DOMAIN-SAFE)
+# ✅ FIXED LEAD SCORE (CORRECT DATA JOIN)
 # =========================================================
 @app.get("/blog-lead-score/{blog_id}")
 def blog_lead_score(blog_id: int):
@@ -238,7 +238,7 @@ def blog_lead_score(blog_id: int):
         conn.close()
         raise HTTPException(404, "Blog not found")
 
-    root_domain = extract_domain(root["blog_url"])
+    root_url = root["blog_url"]
 
     cur.execute("""
         SELECT
@@ -246,22 +246,21 @@ def blog_lead_score(blog_id: int):
             SUM(CASE WHEN ol.is_casino THEN 1 ELSE 0 END) AS casino,
             SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END) AS dofollow
         FROM blog_pages bp
-        LEFT JOIN outbound_links ol ON ol.blog_page_id = bp.id
-        WHERE bp.is_root = FALSE
-        AND bp.blog_url LIKE %s
-    """, (f"%{root_domain}%",))
+        JOIN outbound_links ol ON ol.blog_page_id = bp.id
+        WHERE bp.blog_url LIKE %s
+    """, (root_url + "%",))
 
     r = cur.fetchone() or {}
     cur.close()
     conn.close()
 
-    total = r.get("total_links") or 0
-    casino = r.get("casino") or 0
-    dofollow = r.get("dofollow") or 0
+    total = r["total_links"] or 0
+    casino = r["casino"] or 0
+    dofollow = r["dofollow"] or 0
 
     return {
         "total_links": total,
         "casino_percentage": round((casino / total) * 100, 2) if total else 0,
         "dofollow_percentage": round((dofollow / total) * 100, 2) if total else 0,
-        "lead_score": min(100, max(0, int(dofollow - casino)))
+        "lead_score": max(0, min(100, dofollow - casino))
     }
