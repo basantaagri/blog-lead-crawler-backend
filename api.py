@@ -102,10 +102,7 @@ def is_casino_link(url):
 
 def is_valid_post_url(url, domain):
     blacklist = ["/tag/", "/category/", "/author/", "/page/", "/feed"]
-    return (
-        extract_domain(url) == domain
-        and not any(b in url for b in blacklist)
-    )
+    return extract_domain(url) == domain and not any(b in url for b in blacklist)
 
 # =========================
 # SITEMAP
@@ -222,9 +219,9 @@ def crawl_blog(data: CrawlRequest):
         VALUES (%s, NOW(), TRUE)
     """, (blog_url,))
 
-    urls = fetch_sitemap_urls(blog_url)
-    if not urls:
-        urls = [{"url": u} for u in fallback_discover_posts(blog_url, domain)]
+    urls = fetch_sitemap_urls(blog_url) or [
+        {"url": u} for u in fallback_discover_posts(blog_url, domain)
+    ]
 
     for u in urls[:MAX_PAGES]:
         if is_valid_post_url(u["url"], domain):
@@ -295,7 +292,7 @@ def crawl_links(data: CrawlRequest):
     }
 
 # =========================
-# FRONTEND SUPPORT APIS
+# FRONTEND SUPPORT
 # =========================
 @app.get("/history")
 def history():
@@ -343,7 +340,7 @@ def blog_lead_score(blog_id: int):
     }
 
 # =========================
-# CSV VIEWS (INLINE)
+# CSV INLINE VIEWS
 # =========================
 @app.get("/export/blog-page-links")
 def export_blog_page_links():
