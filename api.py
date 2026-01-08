@@ -95,83 +95,6 @@ def extract_domain(url: str) -> str:
 def is_casino_link(url: str) -> bool:
     return any(k in url.lower() for k in CASINO_KEYWORDS)
 
-def is_valid_post_url(url: str, domain: str) -> bool:
-    blacklist = ["/tag/", "/category/", "/author/", "/page/", "/feed"]
-    return extract_domain(url) == domain and not any(b in url for b in blacklist)
-
-# =========================================================
-# SITEMAP DISCOVERY
-# =========================================================
-def fetch_sitemap_urls(blog_url: str):
-    for path in ["/sitemap.xml", "/post-sitemap.xml", "/wp-sitemap.xml"]:
-        try:
-            r = session.get(blog_url + path, timeout=15)
-            if r.status_code != 200:
-                continue
-            root = ET.fromstring(r.text)
-            ns = {"ns": "http://www.sitemaps.org/schemas/sitemap/0.9"}
-            return [{"url": loc.text.strip()} for loc in root.findall(".//ns:loc", ns)]
-        except:
-            continue
-    return []
-
-def fallback_discover_posts(blog_url: str, domain: str):
-    try:
-        r = session.get(blog_url, timeout=20)
-        soup = BeautifulSoup(r.text, "html.parser")
-        urls = []
-        for a in soup.find_all("a", href=True):
-            full = urljoin(blog_url, a["href"])
-            if extract_domain(full) == domain:
-                urls.append(full)
-        return list(set(urls))[:100]
-    except:
-        return []
-
-# =========================================================
-# LINK EXTRACTION
-# =========================================================
-def extract_outbound_links(page_url: str):
-    try:
-        r = session.get(page_url, timeout=15)
-        html = r.text.lower()
-
-        if r.status_code >= 400 or any(b in html for b in BLOCK_SIGNATURES):
-            return "BLOCKED"
-
-        soup = BeautifulSoup(r.text, "html.parser")
-        base_domain = extract_domain(page_url)
-        links = []
-
-        for a in soup.find_all("a", href=True):
-            full = urljoin(page_url, a["href"])
-            if extract_domain(full) == base_domain:
-                continue
-
-            rel = " ".join(a.get("rel", [])).lower()
-            links.append({
-                "url": full,
-                "is_dofollow": "nofollow" not in rel
-            })
-
-        return list({l["url"]: l for l in links}.values())
-    except:
-        return "BLOCKED"
-
-def upsert_commercial_site(cur, url, is_casino):
-    domain = extract_domain(url)
-    cur.execute("""
-        INSERT INTO commercial_sites (commercial_domain, total_links, is_casino)
-        VALUES (%s, 0, FALSE)
-        ON CONFLICT (commercial_domain) DO NOTHING
-    """, (domain,))
-    cur.execute("""
-        UPDATE commercial_sites
-        SET total_links = total_links + 1,
-            is_casino = is_casino OR %s
-        WHERE commercial_domain = %s
-    """, (is_casino, domain))
-
 # =========================================================
 # CSV INLINE
 # =========================================================
@@ -245,7 +168,44 @@ def export_blog_page_links():
     return rows_to_csv(rows)
 
 # =========================================================
-# 🔧 crawl-links (UNCHANGED)
+# 📄 OUTPUT #2 — COMMERCIAL SITES SUMMARY (CSV)  ✅ ADDED
+# =========================================================
+@app.get("/export/commercial-sites")
+def export_commercial_sites():
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT
+            cs.commercial_domain,
+            COUNT(DISTINCT root.blog_url) AS blogs_count,
+            cs.total_links,
+            cs.dofollow_percent,
+            cs.is_casino
+        FROM commercial_sites cs
+        JOIN outbound_links ol
+          ON ol.url LIKE '%' || cs.commercial_domain || '%'
+        JOIN blog_pages bp
+          ON bp.id = ol.blog_page_id
+        JOIN blog_pages root
+          ON root.is_root = TRUE
+         AND bp.blog_url LIKE root.blog_url || '%'
+        GROUP BY
+            cs.commercial_domain,
+            cs.total_links,
+            cs.dofollow_percent,
+            cs.is_casino
+        ORDER BY cs.total_links DESC
+    """)
+
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    return rows_to_csv(rows)
+
+# =========================================================
+# crawl-links (UNCHANGED)
 # =========================================================
 @app.post("/crawl-links")
 def crawl_links(data: CrawlRequest):
