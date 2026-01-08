@@ -214,7 +214,38 @@ def history():
     return rows
 
 # =========================================================
-# 🔧 ADDED BACK — crawl-links (NO OTHER CHANGES)
+# 📄 OUTPUT #1 — BLOG → PAGE → COMMERCIAL LINKS (CSV)
+# =========================================================
+@app.get("/export/blog-page-links")
+def export_blog_page_links():
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT
+            root.blog_url AS blog,
+            bp.blog_url   AS blog_page,
+            ol.url        AS commercial_link,
+            ol.is_dofollow,
+            ol.is_casino
+        FROM blog_pages root
+        JOIN blog_pages bp
+          ON bp.blog_url LIKE root.blog_url || '%'
+         AND bp.is_root = FALSE
+        JOIN outbound_links ol
+          ON ol.blog_page_id = bp.id
+        WHERE root.is_root = TRUE
+        ORDER BY root.blog_url, bp.blog_url
+    """)
+
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    return rows_to_csv(rows)
+
+# =========================================================
+# 🔧 crawl-links (UNCHANGED)
 # =========================================================
 @app.post("/crawl-links")
 def crawl_links(data: CrawlRequest):
