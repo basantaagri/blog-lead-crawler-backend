@@ -108,7 +108,6 @@ def fetch_sitemap_urls(blog_url: str):
             r = session.get(blog_url + path, timeout=15)
             if r.status_code != 200:
                 continue
-
             root = ET.fromstring(r.text)
             ns = {"ns": "http://www.sitemaps.org/schemas/sitemap/0.9"}
             return [{"url": loc.text.strip()} for loc in root.findall(".//ns:loc", ns)]
@@ -121,12 +120,10 @@ def fallback_discover_posts(blog_url: str, domain: str):
         r = session.get(blog_url, timeout=20)
         soup = BeautifulSoup(r.text, "html.parser")
         urls = []
-
         for a in soup.find_all("a", href=True):
             full = urljoin(blog_url, a["href"])
             if extract_domain(full) == domain:
                 urls.append(full)
-
         return list(set(urls))[:100]
     except:
         return []
@@ -163,13 +160,11 @@ def extract_outbound_links(page_url: str):
 
 def upsert_commercial_site(cur, url, is_casino):
     domain = extract_domain(url)
-
     cur.execute("""
         INSERT INTO commercial_sites (commercial_domain, total_links, is_casino)
         VALUES (%s, 0, FALSE)
         ON CONFLICT (commercial_domain) DO NOTHING
     """, (domain,))
-
     cur.execute("""
         UPDATE commercial_sites
         SET total_links = total_links + 1,
@@ -219,7 +214,67 @@ def history():
     return rows
 
 # =========================================================
-# ✅ FIXED LEAD SCORE (CORRECT DATA JOIN)
+# 🔧 ADDED BACK — crawl-links (NO OTHER CHANGES)
+# =========================================================
+@app.post("/crawl-links")
+def crawl_links(data: CrawlRequest):
+    blog_url = normalize_blog_url(data.blog_url)
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT id, blog_url
+        FROM blog_pages
+        WHERE is_root = FALSE
+        AND blog_url LIKE %s
+    """, (blog_url + "%",))
+
+    pages = cur.fetchall()
+    if not pages:
+        cur.close()
+        conn.close()
+        raise HTTPException(404, "Run /crawl first")
+
+    saved = casino = blocked = 0
+
+    for p in pages:
+        time.sleep(random.uniform(1.0, 2.0))
+        result = extract_outbound_links(p["blog_url"])
+
+        if result == "BLOCKED":
+            blocked += 1
+            continue
+
+        for l in result:
+            is_c = is_casino_link(l["url"])
+            cur.execute("""
+                INSERT INTO outbound_links
+                (blog_page_id, url, is_casino, is_dofollow)
+                VALUES (%s,%s,%s,%s)
+                ON CONFLICT DO NOTHING
+                RETURNING id
+            """, (p["id"], l["url"], is_c, l["is_dofollow"]))
+
+            if cur.fetchone():
+                upsert_commercial_site(cur, l["url"], is_c)
+                saved += 1
+                casino += int(is_c)
+
+        conn.commit()
+
+    cur.close()
+    conn.close()
+
+    return {
+        "pages_scanned": len(pages),
+        "saved_links": saved,
+        "casino_links": casino,
+        "blocked_pages": blocked
+    }
+
+# =========================================================
+# LEAD SCORE (UNCHANGED)
 # =========================================================
 @app.get("/blog-lead-score/{blog_id}")
 def blog_lead_score(blog_id: int):
