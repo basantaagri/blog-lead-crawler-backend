@@ -195,6 +195,7 @@ def crawl_links(data: CrawlRequest):
         links = extract_outbound_links(p["blog_url"])
         if links == "BLOCKED":
             continue
+
         for l in links:
             is_c = is_casino_link(l["url"])
             cur.execute("""
@@ -204,6 +205,7 @@ def crawl_links(data: CrawlRequest):
                 ON CONFLICT DO NOTHING
             """, (p["id"], l["url"], is_c, l["is_dofollow"]))
             upsert_commercial_site(cur, l["url"], is_c)
+
         conn.commit()
 
     cur.close()
@@ -261,10 +263,12 @@ def crawl_csv(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="CSV must contain blog_url column")
 
     results = []
+
     for blog in blogs:
         try:
+            crawl_blog(CrawlRequest(blog_url=blog))
             crawl_links(CrawlRequest(blog_url=blog))
-            results.append({"blog": blog, "status": "queued"})
+            results.append({"blog": blog, "status": "processed"})
         except:
             results.append({"blog": blog, "status": "failed"})
 
