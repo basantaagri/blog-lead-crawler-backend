@@ -1,7 +1,7 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -158,36 +158,24 @@ class CrawlRequest(BaseModel):
 def health():
     return {"status": "ok"}
 
-# =========================================================
-# POST /crawl  (ROOT + PAGES DISCOVERY)
-# =========================================================
 @app.post("/crawl")
 def crawl_blog(data: CrawlRequest):
     blog_url = normalize_blog_url(data.blog_url)
-
     conn = get_db()
     cur = conn.cursor()
-
-    # insert root
     cur.execute("""
         INSERT INTO blog_pages (blog_url, is_root)
         VALUES (%s, TRUE)
         ON CONFLICT (blog_url) DO NOTHING
     """, (blog_url,))
-
     conn.commit()
     cur.close()
     conn.close()
-
     return {"status": "blog registered", "blog": blog_url}
 
-# =========================================================
-# POST /crawl-links  (OUTBOUND LINKS)
-# =========================================================
 @app.post("/crawl-links")
 def crawl_links(data: CrawlRequest):
     blog_url = normalize_blog_url(data.blog_url)
-
     conn = get_db()
     cur = conn.cursor()
 
@@ -201,51 +189,27 @@ def crawl_links(data: CrawlRequest):
 
     pages = cur.fetchall()
     if not pages:
-        cur.close()
-        conn.close()
         raise HTTPException(404, "No pages found. Run crawl first.")
 
-    saved = casino = blocked = 0
-
     for p in pages:
-        time.sleep(random.uniform(1.0, 2.0))
         links = extract_outbound_links(p["blog_url"])
-
         if links == "BLOCKED":
-            blocked += 1
             continue
-
         for l in links:
             is_c = is_casino_link(l["url"])
-
             cur.execute("""
                 INSERT INTO outbound_links
                 (blog_page_id, url, is_casino, is_dofollow)
                 VALUES (%s,%s,%s,%s)
                 ON CONFLICT DO NOTHING
-                RETURNING id
             """, (p["id"], l["url"], is_c, l["is_dofollow"]))
-
-            if cur.fetchone():
-                upsert_commercial_site(cur, l["url"], is_c)
-                saved += 1
-                casino += int(is_c)
-
+            upsert_commercial_site(cur, l["url"], is_c)
         conn.commit()
 
     cur.close()
     conn.close()
+    return {"status": "completed"}
 
-    return {
-        "pages_scanned": len(pages),
-        "saved_links": saved,
-        "casino_links": casino,
-        "blocked_pages": blocked
-    }
-
-# =========================================================
-# GET /history
-# =========================================================
 @app.get("/history")
 def history():
     conn = get_db()
@@ -268,7 +232,6 @@ def history():
         LEFT JOIN commercial_sites cs
             ON ol.url LIKE '%' || cs.commercial_domain || '%'
         WHERE root.is_root = TRUE
-          AND root.first_crawled >= NOW() - INTERVAL '30 days'
         GROUP BY root.blog_url
         ORDER BY root.blog_url
     """)
@@ -278,82 +241,34 @@ def history():
     return rows
 
 # =========================================================
-# EXPORTS
+# ✅ NEW ENDPOINT — CSV BULK CRAWL (APPENDED ONLY)
 # =========================================================
-@app.get("/export/blog-page-links")
-def export_blog_page_links():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT
-            root.blog_url AS blog,
-            bp.blog_url AS blog_page,
-            ol.url AS commercial_link,
-            ol.is_dofollow,
-            ol.is_casino
-        FROM blog_pages root
-        JOIN blog_pages bp
-          ON bp.blog_url LIKE root.blog_url || '%'
-         AND bp.is_root = FALSE
-        JOIN outbound_links ol ON ol.blog_page_id = bp.id
-        WHERE root.is_root = TRUE
-        ORDER BY root.blog_url, bp.blog_url
-    """)
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return rows_to_csv(rows)
+@app.post("/crawl-csv")
+def crawl_csv(file: UploadFile = File(...)):
+    if not file.filename.endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Only CSV files allowed")
 
-@app.get("/export/commercial-sites")
-def export_commercial_sites():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT
-            cs.commercial_domain,
-            COUNT(DISTINCT root.blog_url) AS blogs_count,
-            cs.total_links,
-            cs.dofollow_percent,
-            cs.is_casino
-        FROM commercial_sites cs
-        JOIN outbound_links ol ON ol.url LIKE '%' || cs.commercial_domain || '%'
-        JOIN blog_pages bp ON bp.id = ol.blog_page_id
-        JOIN blog_pages root
-          ON root.is_root = TRUE
-         AND bp.blog_url LIKE root.blog_url || '%'
-        GROUP BY cs.commercial_domain, cs.total_links, cs.dofollow_percent, cs.is_casino
-        ORDER BY cs.total_links DESC
-    """)
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return rows_to_csv(rows)
+    content = file.file.read().decode("utf-8")
+    reader = csv.DictReader(io.StringIO(content))
 
-@app.get("/export/blog-summary")
-def export_blog_summary():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT
-            root.blog_url AS blog,
-            COUNT(DISTINCT cs.commercial_domain) AS unique_commercial_sites,
-            ROUND(
-                100.0 * SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END)
-                / NULLIF(COUNT(ol.id), 0), 2
-            ) AS dofollow_percentage,
-            BOOL_OR(ol.is_casino) AS has_casino_links
-        FROM blog_pages root
-        JOIN blog_pages bp
-          ON bp.blog_url LIKE root.blog_url || '%'
-         AND bp.is_root = FALSE
-        JOIN outbound_links ol ON ol.blog_page_id = bp.id
-        JOIN commercial_sites cs
-          ON ol.url LIKE '%' || cs.commercial_domain || '%'
-        WHERE root.is_root = TRUE
-        GROUP BY root.blog_url
-        ORDER BY root.blog_url
-    """)
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return rows_to_csv(rows)
+    blogs = []
+    for row in reader:
+        blog_url = row.get("blog_url")
+        if blog_url:
+            blogs.append(blog_url.strip())
+
+    if not blogs:
+        raise HTTPException(status_code=400, detail="CSV must contain blog_url column")
+
+    results = []
+    for blog in blogs:
+        try:
+            crawl_links(CrawlRequest(blog_url=blog))
+            results.append({"blog": blog, "status": "queued"})
+        except:
+            results.append({"blog": blog, "status": "failed"})
+
+    return {
+        "total": len(blogs),
+        "processed": results
+    }
