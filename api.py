@@ -12,7 +12,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 import urllib3
 
-# ✅ SAFE ADDITIONS
+# ✅ SAFE ADDITIONS (STEP 3)
 from threading import Thread
 from queue import Queue
 
@@ -138,7 +138,7 @@ def upsert_commercial_site(cur, url: str, is_casino: bool):
     """, (domain, is_casino))
 
 # =========================================================
-# ✅ BACKGROUND CRAWL QUEUE (SAFE ADDITION)
+# ✅ BACKGROUND CRAWL QUEUE (STEP 3 — SAFE)
 # =========================================================
 crawl_queue = Queue()
 
@@ -204,7 +204,7 @@ def crawl_blog(data: CrawlRequest):
     return {"status": "blog registered", "blog": blog_url}
 
 # =========================================================
-# POST /crawl-links  (UNCHANGED – STILL SYNC)
+# POST /crawl-links (SYNC – UNCHANGED)
 # =========================================================
 @app.post("/crawl-links")
 def crawl_links(data: CrawlRequest):
