@@ -181,9 +181,6 @@ class CrawlRequest(BaseModel):
 def health():
     return {"status": "ok"}
 
-# =========================================================
-# POST /crawl
-# =========================================================
 @app.post("/crawl")
 def crawl_blog(data: CrawlRequest):
     blog_url = normalize_blog_url(data.blog_url)
@@ -203,9 +200,6 @@ def crawl_blog(data: CrawlRequest):
 
     return {"status": "blog registered", "blog": blog_url}
 
-# =========================================================
-# POST /crawl-links (SYNC – UNCHANGED)
-# =========================================================
 @app.post("/crawl-links")
 def crawl_links(data: CrawlRequest):
     blog_url = normalize_blog_url(data.blog_url)
@@ -265,9 +259,6 @@ def crawl_links(data: CrawlRequest):
         "blocked_pages": blocked
     }
 
-# =========================================================
-# GET /history
-# =========================================================
 @app.get("/history")
 def history():
     conn = get_db()
@@ -300,7 +291,7 @@ def history():
     return rows
 
 # =========================================================
-# EXPORTS (UNCHANGED)
+# EXPORTS
 # =========================================================
 @app.get("/export/blog-page-links")
 def export_blog_page_links():
@@ -379,3 +370,30 @@ def export_blog_summary():
     cur.close()
     conn.close()
     return rows_to_csv(rows)
+
+# =========================================================
+# 🟢 SAFE ADDITION — GET /progress
+# =========================================================
+@app.get("/progress")
+def progress():
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT
+            blog_url,
+            crawl_status,
+            COUNT(bp.id) FILTER (WHERE bp.is_root = FALSE) AS pages_discovered
+        FROM blog_pages root
+        LEFT JOIN blog_pages bp
+          ON bp.blog_url LIKE root.blog_url || '%'
+         AND bp.is_root = FALSE
+        WHERE root.is_root = TRUE
+        GROUP BY blog_url, crawl_status
+        ORDER BY blog_url
+    """)
+
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
