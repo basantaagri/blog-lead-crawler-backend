@@ -12,7 +12,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 import urllib3
 
-# ✅ SAFE ADDITIONS (STEP 3)
+# ✅ SAFE ADDITIONS
 from threading import Thread
 from queue import Queue
 
@@ -138,7 +138,7 @@ def upsert_commercial_site(cur, url: str, is_casino: bool):
     """, (domain, is_casino))
 
 # =========================================================
-# ✅ BACKGROUND CRAWL QUEUE (SAFE)
+# BACKGROUND QUEUE
 # =========================================================
 crawl_queue = Queue()
 
@@ -184,26 +184,21 @@ def health():
 @app.post("/crawl")
 def crawl_blog(data: CrawlRequest):
     blog_url = normalize_blog_url(data.blog_url)
-
     conn = get_db()
     cur = conn.cursor()
-
     cur.execute("""
         INSERT INTO blog_pages (blog_url, is_root)
         VALUES (%s, TRUE)
         ON CONFLICT (blog_url) DO NOTHING
     """, (blog_url,))
-
     conn.commit()
     cur.close()
     conn.close()
-
     return {"status": "blog registered", "blog": blog_url}
 
 @app.post("/crawl-links")
 def crawl_links(data: CrawlRequest):
     blog_url = normalize_blog_url(data.blog_url)
-
     conn = get_db()
     cur = conn.cursor()
 
@@ -217,47 +212,29 @@ def crawl_links(data: CrawlRequest):
 
     pages = cur.fetchall()
     if not pages:
-        cur.close()
-        conn.close()
         raise HTTPException(404, "No pages found. Run crawl first.")
-
-    saved = casino = blocked = 0
 
     for p in pages:
         time.sleep(random.uniform(1.0, 2.0))
         links = extract_outbound_links(p["blog_url"])
-
         if links == "BLOCKED":
-            blocked += 1
             continue
 
         for l in links:
             is_c = is_casino_link(l["url"])
-
             cur.execute("""
                 INSERT INTO outbound_links
                 (blog_page_id, url, is_casino, is_dofollow)
                 VALUES (%s,%s,%s,%s)
                 ON CONFLICT DO NOTHING
-                RETURNING id
             """, (p["id"], l["url"], is_c, l["is_dofollow"]))
-
-            if cur.fetchone():
-                upsert_commercial_site(cur, l["url"], is_c)
-                saved += 1
-                casino += int(is_c)
+            upsert_commercial_site(cur, l["url"], is_c)
 
         conn.commit()
 
     cur.close()
     conn.close()
-
-    return {
-        "pages_scanned": len(pages),
-        "saved_links": saved,
-        "casino_links": casino,
-        "blocked_pages": blocked
-    }
+    return {"status": "completed"}
 
 @app.get("/history")
 def history():
@@ -275,13 +252,12 @@ def history():
             BOOL_OR(ol.is_casino) AS has_casino_links
         FROM blog_pages root
         LEFT JOIN blog_pages bp
-            ON bp.blog_url LIKE root.blog_url || '%'
-           AND bp.is_root = FALSE
+          ON bp.blog_url LIKE root.blog_url || '%'
+         AND bp.is_root = FALSE
         LEFT JOIN outbound_links ol ON ol.blog_page_id = bp.id
         LEFT JOIN commercial_sites cs
-            ON ol.url LIKE '%' || cs.commercial_domain || '%'
+          ON ol.url LIKE '%' || cs.commercial_domain || '%'
         WHERE root.is_root = TRUE
-          AND root.first_crawled >= NOW() - INTERVAL '30 days'
         GROUP BY root.blog_url
         ORDER BY root.blog_url
     """)
@@ -290,9 +266,6 @@ def history():
     conn.close()
     return rows
 
-# =========================================================
-# EXPORTS
-# =========================================================
 @app.get("/export/blog-page-links")
 def export_blog_page_links():
     conn = get_db()
@@ -371,14 +344,10 @@ def export_blog_summary():
     conn.close()
     return rows_to_csv(rows)
 
-# =========================================================
-# 🟢 SAFE FIXED — GET /progress
-# =========================================================
 @app.get("/progress")
 def progress():
     conn = get_db()
     cur = conn.cursor()
-
     cur.execute("""
         SELECT
             root.blog_url,
@@ -392,8 +361,18 @@ def progress():
         GROUP BY root.blog_url, root.crawl_status
         ORDER BY root.blog_url
     """)
-
     rows = cur.fetchall()
     cur.close()
     conn.close()
     return rows
+
+# =========================================================
+# ✅ NEW — POST /crawl-async (QUEUE BASED)
+# =========================================================
+@app.post("/crawl-async")
+def crawl_async(data: CrawlRequest):
+    crawl_queue.put(data.blog_url)
+    return {
+        "status": "queued",
+        "blog": data.blog_url
+    }
