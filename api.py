@@ -96,22 +96,67 @@ def is_casino_link(url: str) -> bool:
     return any(k in url.lower() for k in CASINO_KEYWORDS)
 
 # =========================================================
-# COMMERCIAL HOMEPAGE INTELLIGENCE (SAFE, ONE-TIME)
+# REQUIRED HELPERS (MISSING EARLIER)
+# =========================================================
+def extract_outbound_links(page_url: str):
+    try:
+        r = session.get(page_url, timeout=15, verify=False)
+        html = r.text.lower()
+
+        for sig in BLOCK_SIGNATURES:
+            if sig in html:
+                return "BLOCKED"
+
+        soup = BeautifulSoup(r.text, "html.parser")
+        links = []
+
+        for a in soup.find_all("a", href=True):
+            href = a["href"].strip()
+            if href.startswith("#") or href.startswith("mailto:"):
+                continue
+
+            full_url = urljoin(page_url, href)
+            parsed = urlparse(full_url)
+            if not parsed.netloc:
+                continue
+
+            if extract_domain(full_url) != extract_domain(page_url):
+                rel = a.get("rel", [])
+                is_dofollow = "nofollow" not in [r.lower() for r in rel]
+                links.append({
+                    "url": full_url,
+                    "is_dofollow": is_dofollow
+                })
+
+        return links
+    except:
+        return []
+
+def upsert_commercial_site(cur, url: str, is_casino: bool):
+    domain = extract_domain(url)
+    cur.execute("""
+        INSERT INTO commercial_sites
+        (commercial_domain, total_links, dofollow_percent, is_casino)
+        VALUES (%s, 1, 100.0, %s)
+        ON CONFLICT (commercial_domain)
+        DO UPDATE SET
+            total_links = commercial_sites.total_links + 1,
+            is_casino = commercial_sites.is_casino OR EXCLUDED.is_casino
+    """, (domain, is_casino))
+
+# =========================================================
+# COMMERCIAL HOMEPAGE INTELLIGENCE
 # =========================================================
 def fetch_homepage_meta(domain: str):
     try:
-        url = "https://" + domain
-        r = session.get(url, timeout=15, verify=False)
+        r = session.get("https://" + domain, timeout=15, verify=False)
         if r.status_code != 200:
             return None, None, None
 
         soup = BeautifulSoup(r.text, "html.parser")
-
         title = soup.title.string.strip() if soup.title and soup.title.string else ""
-
         desc_tag = soup.find("meta", attrs={"name": "description"})
         description = desc_tag["content"].strip() if desc_tag and desc_tag.get("content") else ""
-
         text = soup.get_text(separator=" ").lower()
         return title, description, text
     except:
@@ -163,9 +208,6 @@ def history():
     conn.close()
     return rows
 
-# =========================================================
-# OUTPUT #1
-# =========================================================
 @app.get("/export/blog-page-links")
 def export_blog_page_links():
     conn = get_db()
@@ -190,9 +232,6 @@ def export_blog_page_links():
     conn.close()
     return rows_to_csv(rows)
 
-# =========================================================
-# OUTPUT #2
-# =========================================================
 @app.get("/export/commercial-sites")
 def export_commercial_sites():
     conn = get_db()
@@ -223,9 +262,6 @@ def export_commercial_sites():
     conn.close()
     return rows_to_csv(rows)
 
-# =========================================================
-# OUTPUT #3
-# =========================================================
 @app.get("/export/blog-summary")
 def export_blog_summary():
     conn = get_db()
@@ -255,9 +291,6 @@ def export_blog_summary():
     conn.close()
     return rows_to_csv(rows)
 
-# =========================================================
-# CRAWL LINKS (INTEGRITY PRESERVED + ENRICHMENT ADDED)
-# =========================================================
 @app.post("/crawl-links")
 def crawl_links(data: CrawlRequest):
     blog_url = normalize_blog_url(data.blog_url)
@@ -302,7 +335,6 @@ def crawl_links(data: CrawlRequest):
             if cur.fetchone():
                 upsert_commercial_site(cur, l["url"], is_c)
 
-                # 🔎 HOMEPAGE META ENRICHMENT (ONE-TIME)
                 domain = extract_domain(l["url"])
                 cur.execute("""
                     SELECT homepage_checked
