@@ -12,7 +12,6 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 import urllib3
 
-# ✅ SAFE ADDITIONS
 from threading import Thread
 from queue import Queue
 
@@ -79,15 +78,9 @@ BLOCK_SIGNATURES = [
 ]
 
 SOCIAL_DOMAINS = {
-    "facebook.com",
-    "twitter.com",
-    "x.com",
-    "linkedin.com",
-    "instagram.com",
-    "youtube.com",
-    "t.me",
-    "whatsapp.com",
-    "bsky.app"
+    "facebook.com", "twitter.com", "x.com", "linkedin.com",
+    "instagram.com", "youtube.com", "t.me",
+    "whatsapp.com", "bsky.app"
 }
 
 # =========================================================
@@ -114,7 +107,6 @@ def is_valid_commercial_link(href: str, blog_domain: str) -> bool:
         return False
 
     parsed = urlparse(href)
-
     if not parsed.netloc:
         return False
 
@@ -131,7 +123,7 @@ def is_valid_commercial_link(href: str, blog_domain: str) -> bool:
     return True
 
 # =========================================================
-# LINK EXTRACTION (FILTERED + SAFE)
+# LINK EXTRACTION
 # =========================================================
 def extract_outbound_links(page_url: str):
     try:
@@ -148,16 +140,14 @@ def extract_outbound_links(page_url: str):
         blog_domain = extract_domain(page_url)
 
         for a in soup.find_all("a", href=True):
-            href = a["href"]
-
-            full_url = urljoin(page_url, href)
+            full_url = urljoin(page_url, a["href"])
 
             if not is_valid_commercial_link(full_url, blog_domain):
                 continue
 
             commercial_domain = extract_domain(full_url)
             if not commercial_domain:
-                continue  # 🔥 prevents NaN rows
+                continue
 
             rel = a.get("rel", [])
             is_dofollow = "nofollow" not in [r.lower() for r in rel]
@@ -187,7 +177,7 @@ def upsert_commercial_site(cur, url: str, is_casino: bool):
     """, (domain, is_casino))
 
 # =========================================================
-# BACKGROUND QUEUE
+# QUEUE WORKER
 # =========================================================
 crawl_queue = Queue()
 
@@ -195,11 +185,7 @@ def crawl_worker():
     while True:
         blog_url = crawl_queue.get()
         try:
-            print(f"[QUEUE] Crawling: {blog_url}")
             crawl_links(CrawlRequest(blog_url=blog_url))
-            print(f"[QUEUE] Done: {blog_url}")
-        except Exception as e:
-            print(f"[QUEUE] Failed: {blog_url} | {e}")
         finally:
             crawl_queue.task_done()
 
@@ -224,7 +210,7 @@ class CrawlRequest(BaseModel):
     blog_url: str
 
 # =========================================================
-# ROUTES (UNCHANGED)
+# ROUTES
 # =========================================================
 @app.get("/")
 def health():
@@ -284,5 +270,3 @@ def crawl_links(data: CrawlRequest):
     cur.close()
     conn.close()
     return {"status": "completed"}
-
-# (history, export, progress, crawl-async routes unchanged — same as your version)
