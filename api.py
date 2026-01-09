@@ -17,7 +17,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 print("### BLOG LEAD CRAWLER — SAFE PRODUCTION VERSION RUNNING ###")
 
 # =========================================================
-# GLOBAL HEADERS
+# HEADERS
 # =========================================================
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
@@ -30,13 +30,10 @@ session = requests.Session()
 session.headers.update(HEADERS)
 
 # =========================================================
-# APP INIT
+# APP
 # =========================================================
 app = FastAPI(title="Blog Lead Crawler API", version="1.2.6")
 
-# =========================================================
-# CORS
-# =========================================================
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -49,7 +46,7 @@ app.add_middleware(
 )
 
 # =========================================================
-# DATABASE
+# DB
 # =========================================================
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
@@ -162,13 +159,97 @@ def health():
     return {"status": "ok"}
 
 # =========================================================
-# ✅ FIXED HISTORY (SCHEMA-ALIGNED)
+# POST /crawl  (ROOT + PAGES DISCOVERY)
+# =========================================================
+@app.post("/crawl")
+def crawl_blog(data: CrawlRequest):
+    blog_url = normalize_blog_url(data.blog_url)
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    # insert root
+    cur.execute("""
+        INSERT INTO blog_pages (blog_url, is_root)
+        VALUES (%s, TRUE)
+        ON CONFLICT (blog_url) DO NOTHING
+    """, (blog_url,))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return {"status": "blog registered", "blog": blog_url}
+
+# =========================================================
+# POST /crawl-links  (OUTBOUND LINKS)
+# =========================================================
+@app.post("/crawl-links")
+def crawl_links(data: CrawlRequest):
+    blog_url = normalize_blog_url(data.blog_url)
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT id, blog_url
+        FROM blog_pages
+        WHERE is_root = FALSE
+          AND blog_url LIKE %s
+        LIMIT 20
+    """, (blog_url + "%",))
+
+    pages = cur.fetchall()
+    if not pages:
+        cur.close()
+        conn.close()
+        raise HTTPException(404, "No pages found. Run crawl first.")
+
+    saved = casino = blocked = 0
+
+    for p in pages:
+        time.sleep(random.uniform(1.0, 2.0))
+        links = extract_outbound_links(p["blog_url"])
+
+        if links == "BLOCKED":
+            blocked += 1
+            continue
+
+        for l in links:
+            is_c = is_casino_link(l["url"])
+
+            cur.execute("""
+                INSERT INTO outbound_links
+                (blog_page_id, url, is_casino, is_dofollow)
+                VALUES (%s,%s,%s,%s)
+                ON CONFLICT DO NOTHING
+                RETURNING id
+            """, (p["id"], l["url"], is_c, l["is_dofollow"]))
+
+            if cur.fetchone():
+                upsert_commercial_site(cur, l["url"], is_c)
+                saved += 1
+                casino += int(is_c)
+
+        conn.commit()
+
+    cur.close()
+    conn.close()
+
+    return {
+        "pages_scanned": len(pages),
+        "saved_links": saved,
+        "casino_links": casino,
+        "blocked_pages": blocked
+    }
+
+# =========================================================
+# GET /history
 # =========================================================
 @app.get("/history")
 def history():
     conn = get_db()
     cur = conn.cursor()
-
     cur.execute("""
         SELECT
             root.blog_url,
@@ -176,31 +257,28 @@ def history():
             COUNT(DISTINCT cs.commercial_domain) AS unique_commercial_sites,
             ROUND(
                 100.0 * SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END)
-                / NULLIF(COUNT(ol.id), 0),
-                2
+                / NULLIF(COUNT(ol.id), 0), 2
             ) AS dofollow_percentage,
             BOOL_OR(ol.is_casino) AS has_casino_links
         FROM blog_pages root
         LEFT JOIN blog_pages bp
             ON bp.blog_url LIKE root.blog_url || '%'
            AND bp.is_root = FALSE
-        LEFT JOIN outbound_links ol
-            ON ol.blog_page_id = bp.id
+        LEFT JOIN outbound_links ol ON ol.blog_page_id = bp.id
         LEFT JOIN commercial_sites cs
             ON ol.url LIKE '%' || cs.commercial_domain || '%'
         WHERE root.is_root = TRUE
           AND root.first_crawled >= NOW() - INTERVAL '30 days'
         GROUP BY root.blog_url
-        ORDER BY root.blog_url;
+        ORDER BY root.blog_url
     """)
-
     rows = cur.fetchall()
     cur.close()
     conn.close()
     return rows
 
 # =========================================================
-# EXPORTS (UNCHANGED)
+# EXPORTS
 # =========================================================
 @app.get("/export/blog-page-links")
 def export_blog_page_links():
@@ -243,11 +321,7 @@ def export_commercial_sites():
         JOIN blog_pages root
           ON root.is_root = TRUE
          AND bp.blog_url LIKE root.blog_url || '%'
-        GROUP BY
-            cs.commercial_domain,
-            cs.total_links,
-            cs.dofollow_percent,
-            cs.is_casino
+        GROUP BY cs.commercial_domain, cs.total_links, cs.dofollow_percent, cs.is_casino
         ORDER BY cs.total_links DESC
     """)
     rows = cur.fetchall()
@@ -265,8 +339,7 @@ def export_blog_summary():
             COUNT(DISTINCT cs.commercial_domain) AS unique_commercial_sites,
             ROUND(
                 100.0 * SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END)
-                / NULLIF(COUNT(ol.id), 0),
-                2
+                / NULLIF(COUNT(ol.id), 0), 2
             ) AS dofollow_percentage,
             BOOL_OR(ol.is_casino) AS has_casino_links
         FROM blog_pages root
