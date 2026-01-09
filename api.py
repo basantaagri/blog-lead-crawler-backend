@@ -270,3 +270,150 @@ def crawl_links(data: CrawlRequest):
     cur.close()
     conn.close()
     return {"status": "completed"}
+
+# =========================================================
+# HISTORY
+# =========================================================
+@app.get("/history")
+def history():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT
+            root.blog_url,
+            COUNT(DISTINCT bp.id) AS total_pages,
+            COUNT(DISTINCT cs.commercial_domain) AS unique_commercial_sites,
+            ROUND(
+                100.0 * SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END)
+                / NULLIF(COUNT(ol.id), 0), 2
+            ) AS dofollow_percentage,
+            BOOL_OR(ol.is_casino) AS has_casino_links
+        FROM blog_pages root
+        LEFT JOIN blog_pages bp
+          ON bp.blog_url LIKE root.blog_url || '%'
+         AND bp.is_root = FALSE
+        LEFT JOIN outbound_links ol ON ol.blog_page_id = bp.id
+        LEFT JOIN commercial_sites cs
+          ON ol.url LIKE '%' || cs.commercial_domain || '%'
+        WHERE root.is_root = TRUE
+        GROUP BY root.blog_url
+        ORDER BY root.blog_url
+    """)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+# =========================================================
+# EXPORTS
+# =========================================================
+@app.get("/export/blog-page-links")
+def export_blog_page_links():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT
+            root.blog_url AS blog,
+            bp.blog_url AS blog_page,
+            ol.url AS commercial_link,
+            ol.is_dofollow,
+            ol.is_casino
+        FROM blog_pages root
+        JOIN blog_pages bp
+          ON bp.blog_url LIKE root.blog_url || '%'
+         AND bp.is_root = FALSE
+        JOIN outbound_links ol ON ol.blog_page_id = bp.id
+        WHERE root.is_root = TRUE
+        ORDER BY root.blog_url, bp.blog_url
+    """)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows_to_csv(rows)
+
+@app.get("/export/commercial-sites")
+def export_commercial_sites():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT
+            cs.commercial_domain,
+            COUNT(DISTINCT root.blog_url) AS blogs_count,
+            cs.total_links,
+            cs.dofollow_percent,
+            cs.is_casino
+        FROM commercial_sites cs
+        JOIN outbound_links ol ON ol.url LIKE '%' || cs.commercial_domain || '%'
+        JOIN blog_pages bp ON bp.id = ol.blog_page_id
+        JOIN blog_pages root
+          ON root.is_root = TRUE
+         AND bp.blog_url LIKE root.blog_url || '%'
+        GROUP BY cs.commercial_domain, cs.total_links, cs.dofollow_percent, cs.is_casino
+        ORDER BY cs.total_links DESC
+    """)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows_to_csv(rows)
+
+@app.get("/export/blog-summary")
+def export_blog_summary():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT
+            root.blog_url AS blog,
+            COUNT(DISTINCT cs.commercial_domain) AS unique_commercial_sites,
+            ROUND(
+                100.0 * SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END)
+                / NULLIF(COUNT(ol.id), 0), 2
+            ) AS dofollow_percentage,
+            BOOL_OR(ol.is_casino) AS has_casino_links
+        FROM blog_pages root
+        JOIN blog_pages bp
+          ON bp.blog_url LIKE root.blog_url || '%'
+         AND bp.is_root = FALSE
+        JOIN outbound_links ol ON ol.blog_page_id = bp.id
+        JOIN commercial_sites cs
+          ON ol.url LIKE '%' || cs.commercial_domain || '%'
+        WHERE root.is_root = TRUE
+        GROUP BY root.blog_url
+        ORDER BY root.blog_url
+    """)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows_to_csv(rows)
+
+# =========================================================
+# PROGRESS
+# =========================================================
+@app.get("/progress")
+def progress():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT
+            root.blog_url,
+            COALESCE(root.crawl_status, 'pending') AS crawl_status,
+            COUNT(bp.id) AS pages_discovered
+        FROM blog_pages root
+        LEFT JOIN blog_pages bp
+          ON bp.blog_url LIKE root.blog_url || '%'
+         AND bp.is_root = FALSE
+        WHERE root.is_root = TRUE
+        GROUP BY root.blog_url, root.crawl_status
+        ORDER BY root.blog_url
+    """)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+# =========================================================
+# ASYNC
+# =========================================================
+@app.post("/crawl-async")
+def crawl_async(data: CrawlRequest):
+    crawl_queue.put(data.blog_url)
+    return {"status": "queued", "blog": data.blog_url}
