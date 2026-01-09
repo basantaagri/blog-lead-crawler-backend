@@ -138,7 +138,7 @@ def upsert_commercial_site(cur, url: str, is_casino: bool):
     """, (domain, is_casino))
 
 # =========================================================
-# ✅ BACKGROUND CRAWL QUEUE (STEP 3 — SAFE)
+# ✅ BACKGROUND CRAWL QUEUE (SAFE)
 # =========================================================
 crawl_queue = Queue()
 
@@ -372,7 +372,7 @@ def export_blog_summary():
     return rows_to_csv(rows)
 
 # =========================================================
-# 🟢 SAFE ADDITION — GET /progress
+# 🟢 SAFE FIXED — GET /progress
 # =========================================================
 @app.get("/progress")
 def progress():
@@ -381,16 +381,16 @@ def progress():
 
     cur.execute("""
         SELECT
-            blog_url,
-            crawl_status,
-            COUNT(bp.id) FILTER (WHERE bp.is_root = FALSE) AS pages_discovered
+            root.blog_url,
+            COALESCE(root.crawl_status, 'pending') AS crawl_status,
+            COUNT(bp.id) AS pages_discovered
         FROM blog_pages root
         LEFT JOIN blog_pages bp
           ON bp.blog_url LIKE root.blog_url || '%'
          AND bp.is_root = FALSE
         WHERE root.is_root = TRUE
-        GROUP BY blog_url, crawl_status
-        ORDER BY blog_url
+        GROUP BY root.blog_url, root.crawl_status
+        ORDER BY root.blog_url
     """)
 
     rows = cur.fetchall()
