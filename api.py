@@ -11,7 +11,6 @@ from psycopg2.extras import RealDictCursor
 import os, requests, csv, io, time, random
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
-import xml.etree.ElementTree as ET
 import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -67,8 +66,6 @@ def get_db():
 # =========================================================
 # CONSTANTS
 # =========================================================
-MAX_PAGES = 1000
-
 CASINO_KEYWORDS = [
     "casino", "bet", "betting", "poker", "slots",
     "sportsbook", "gambling", "roulette", "blackjack"
@@ -96,7 +93,7 @@ def is_casino_link(url: str) -> bool:
     return any(k in url.lower() for k in CASINO_KEYWORDS)
 
 # =========================================================
-# REQUIRED HELPERS (MISSING EARLIER)
+# REQUIRED HELPERS
 # =========================================================
 def extract_outbound_links(page_url: str):
     try:
@@ -116,10 +113,6 @@ def extract_outbound_links(page_url: str):
                 continue
 
             full_url = urljoin(page_url, href)
-            parsed = urlparse(full_url)
-            if not parsed.netloc:
-                continue
-
             if extract_domain(full_url) != extract_domain(page_url):
                 rel = a.get("rel", [])
                 is_dofollow = "nofollow" not in [r.lower() for r in rel]
@@ -145,7 +138,7 @@ def upsert_commercial_site(cur, url: str, is_casino: bool):
     """, (domain, is_casino))
 
 # =========================================================
-# COMMERCIAL HOMEPAGE INTELLIGENCE
+# HOMEPAGE ENRICHMENT
 # =========================================================
 def fetch_homepage_meta(domain: str):
     try:
@@ -154,21 +147,19 @@ def fetch_homepage_meta(domain: str):
             return None, None, None
 
         soup = BeautifulSoup(r.text, "html.parser")
-        title = soup.title.string.strip() if soup.title and soup.title.string else ""
+        title = soup.title.string.strip() if soup.title else ""
         desc_tag = soup.find("meta", attrs={"name": "description"})
-        description = desc_tag["content"].strip() if desc_tag and desc_tag.get("content") else ""
+        desc = desc_tag["content"].strip() if desc_tag else ""
         text = soup.get_text(separator=" ").lower()
-        return title, description, text
+        return title, desc, text
     except:
         return None, None, None
 
 def detect_casino_from_text(text: str):
-    if not text:
-        return False
-    return any(k in text for k in CASINO_KEYWORDS)
+    return any(k in text for k in CASINO_KEYWORDS) if text else False
 
 # =========================================================
-# CSV INLINE
+# CSV
 # =========================================================
 def rows_to_csv(rows):
     buf = io.StringIO()
@@ -192,129 +183,29 @@ class CrawlRequest(BaseModel):
 def health():
     return {"status": "ok"}
 
-@app.get("/history")
-def history():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT id, blog_url, first_crawled
-        FROM blog_pages
-        WHERE is_root = TRUE
-        AND first_crawled >= NOW() - INTERVAL '30 days'
-        ORDER BY first_crawled DESC
-    """)
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return rows
-
-@app.get("/export/blog-page-links")
-def export_blog_page_links():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT
-            root.blog_url AS blog,
-            bp.blog_url AS blog_page,
-            ol.url AS commercial_link,
-            ol.is_dofollow,
-            ol.is_casino
-        FROM blog_pages root
-        JOIN blog_pages bp
-          ON bp.blog_url LIKE root.blog_url || '%'
-         AND bp.is_root = FALSE
-        JOIN outbound_links ol ON ol.blog_page_id = bp.id
-        WHERE root.is_root = TRUE
-        ORDER BY root.blog_url, bp.blog_url
-    """)
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return rows_to_csv(rows)
-
-@app.get("/export/commercial-sites")
-def export_commercial_sites():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT
-            cs.commercial_domain,
-            COUNT(DISTINCT root.blog_url) AS blogs_count,
-            cs.total_links,
-            cs.dofollow_percent,
-            cs.is_casino
-        FROM commercial_sites cs
-        JOIN outbound_links ol
-          ON ol.url LIKE '%' || cs.commercial_domain || '%'
-        JOIN blog_pages bp ON bp.id = ol.blog_page_id
-        JOIN blog_pages root
-          ON root.is_root = TRUE
-         AND bp.blog_url LIKE root.blog_url || '%'
-        GROUP BY
-            cs.commercial_domain,
-            cs.total_links,
-            cs.dofollow_percent,
-            cs.is_casino
-        ORDER BY cs.total_links DESC
-    """)
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return rows_to_csv(rows)
-
-@app.get("/export/blog-summary")
-def export_blog_summary():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT
-            root.blog_url AS blog,
-            COUNT(DISTINCT cs.commercial_domain) AS unique_commercial_sites,
-            ROUND(
-                100.0 * SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END)
-                / NULLIF(COUNT(ol.id), 0), 2
-            ) AS dofollow_percentage,
-            BOOL_OR(ol.is_casino) AS has_casino_links
-        FROM blog_pages root
-        JOIN blog_pages bp
-          ON bp.blog_url LIKE root.blog_url || '%'
-         AND bp.is_root = FALSE
-        JOIN outbound_links ol ON ol.blog_page_id = bp.id
-        JOIN commercial_sites cs
-          ON ol.url LIKE '%' || cs.commercial_domain || '%'
-        WHERE root.is_root = TRUE
-        GROUP BY root.blog_url
-        ORDER BY root.blog_url
-    """)
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return rows_to_csv(rows)
-
 @app.post("/crawl-links")
 def crawl_links(data: CrawlRequest):
     blog_url = normalize_blog_url(data.blog_url)
-
     conn = get_db()
     cur = conn.cursor()
 
+    # 🟢 STEP 1 — BATCH LIMIT APPLIED
     cur.execute("""
         SELECT id, blog_url
         FROM blog_pages
         WHERE is_root = FALSE
         AND blog_url LIKE %s
+        LIMIT 10
     """, (blog_url + "%",))
 
     pages = cur.fetchall()
     if not pages:
-        cur.close()
-        conn.close()
         raise HTTPException(404, "Run /crawl first")
 
     saved = casino = blocked = 0
 
     for p in pages:
-        time.sleep(random.uniform(1.0, 2.0))
+        time.sleep(random.uniform(1, 2))
         result = extract_outbound_links(p["blog_url"])
 
         if result == "BLOCKED":
@@ -323,7 +214,6 @@ def crawl_links(data: CrawlRequest):
 
         for l in result:
             is_c = is_casino_link(l["url"])
-
             cur.execute("""
                 INSERT INTO outbound_links
                 (blog_page_id, url, is_casino, is_dofollow)
@@ -336,15 +226,17 @@ def crawl_links(data: CrawlRequest):
                 upsert_commercial_site(cur, l["url"], is_c)
 
                 domain = extract_domain(l["url"])
+
+                # 🟢 STEP 2 — SKIP ALREADY ENRICHED
                 cur.execute("""
                     SELECT homepage_checked
                     FROM commercial_sites
                     WHERE commercial_domain = %s
+                    AND homepage_checked = FALSE
                 """, (domain,))
                 cs = cur.fetchone()
 
-                if cs and not cs["homepage_checked"]:
-                    time.sleep(random.uniform(2.5, 4.0))
+                if cs:
                     title, desc, text = fetch_homepage_meta(domain)
                     homepage_is_casino = detect_casino_from_text(
                         f"{title or ''} {desc or ''} {text or ''}"
