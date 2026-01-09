@@ -34,7 +34,7 @@ session.headers.update(HEADERS)
 # =========================================================
 # APP INIT
 # =========================================================
-app = FastAPI(title="Blog Lead Crawler API", version="1.2.4")
+app = FastAPI(title="Blog Lead Crawler API", version="1.2.5")
 
 # =========================================================
 # CORS
@@ -95,18 +95,23 @@ def extract_domain(url: str) -> str:
 def is_casino_link(url: str) -> bool:
     return any(k in url.lower() for k in CASINO_KEYWORDS)
 
-# 🔮 FUTURE: COMMERCIAL HOMEPAGE INTELLIGENCE (NOT ACTIVE YET)
+# =========================================================
+# COMMERCIAL HOMEPAGE INTELLIGENCE (SAFE, ONE-TIME)
+# =========================================================
 def fetch_homepage_meta(domain: str):
     try:
-        url = "https://" + domain if not domain.startswith("http") else domain
+        url = "https://" + domain
         r = session.get(url, timeout=15, verify=False)
         if r.status_code != 200:
             return None, None, None
 
         soup = BeautifulSoup(r.text, "html.parser")
+
         title = soup.title.string.strip() if soup.title and soup.title.string else ""
-        desc = soup.find("meta", attrs={"name": "description"})
-        description = desc["content"].strip() if desc and desc.get("content") else ""
+
+        desc_tag = soup.find("meta", attrs={"name": "description"})
+        description = desc_tag["content"].strip() if desc_tag and desc_tag.get("content") else ""
+
         text = soup.get_text(separator=" ").lower()
         return title, description, text
     except:
@@ -159,7 +164,7 @@ def history():
     return rows
 
 # =========================================================
-# 📄 OUTPUT #1 — BLOG → PAGE → COMMERCIAL LINKS
+# OUTPUT #1
 # =========================================================
 @app.get("/export/blog-page-links")
 def export_blog_page_links():
@@ -168,16 +173,15 @@ def export_blog_page_links():
     cur.execute("""
         SELECT
             root.blog_url AS blog,
-            bp.blog_url   AS blog_page,
-            ol.url        AS commercial_link,
+            bp.blog_url AS blog_page,
+            ol.url AS commercial_link,
             ol.is_dofollow,
             ol.is_casino
         FROM blog_pages root
         JOIN blog_pages bp
           ON bp.blog_url LIKE root.blog_url || '%'
          AND bp.is_root = FALSE
-        JOIN outbound_links ol
-          ON ol.blog_page_id = bp.id
+        JOIN outbound_links ol ON ol.blog_page_id = bp.id
         WHERE root.is_root = TRUE
         ORDER BY root.blog_url, bp.blog_url
     """)
@@ -187,7 +191,7 @@ def export_blog_page_links():
     return rows_to_csv(rows)
 
 # =========================================================
-# 📄 OUTPUT #2 — COMMERCIAL SITES SUMMARY
+# OUTPUT #2
 # =========================================================
 @app.get("/export/commercial-sites")
 def export_commercial_sites():
@@ -220,7 +224,7 @@ def export_commercial_sites():
     return rows_to_csv(rows)
 
 # =========================================================
-# 📄 OUTPUT #3 — BLOG SUMMARY (FIXED JOIN ✅)
+# OUTPUT #3
 # =========================================================
 @app.get("/export/blog-summary")
 def export_blog_summary():
@@ -239,8 +243,7 @@ def export_blog_summary():
         JOIN blog_pages bp
           ON bp.blog_url LIKE root.blog_url || '%'
          AND bp.is_root = FALSE
-        JOIN outbound_links ol
-          ON ol.blog_page_id = bp.id
+        JOIN outbound_links ol ON ol.blog_page_id = bp.id
         JOIN commercial_sites cs
           ON ol.url LIKE '%' || cs.commercial_domain || '%'
         WHERE root.is_root = TRUE
@@ -253,5 +256,88 @@ def export_blog_summary():
     return rows_to_csv(rows)
 
 # =========================================================
-# crawl-links & lead score UNCHANGED
+# CRAWL LINKS (INTEGRITY PRESERVED + ENRICHMENT ADDED)
 # =========================================================
+@app.post("/crawl-links")
+def crawl_links(data: CrawlRequest):
+    blog_url = normalize_blog_url(data.blog_url)
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT id, blog_url
+        FROM blog_pages
+        WHERE is_root = FALSE
+        AND blog_url LIKE %s
+    """, (blog_url + "%",))
+
+    pages = cur.fetchall()
+    if not pages:
+        cur.close()
+        conn.close()
+        raise HTTPException(404, "Run /crawl first")
+
+    saved = casino = blocked = 0
+
+    for p in pages:
+        time.sleep(random.uniform(1.0, 2.0))
+        result = extract_outbound_links(p["blog_url"])
+
+        if result == "BLOCKED":
+            blocked += 1
+            continue
+
+        for l in result:
+            is_c = is_casino_link(l["url"])
+
+            cur.execute("""
+                INSERT INTO outbound_links
+                (blog_page_id, url, is_casino, is_dofollow)
+                VALUES (%s,%s,%s,%s)
+                ON CONFLICT DO NOTHING
+                RETURNING id
+            """, (p["id"], l["url"], is_c, l["is_dofollow"]))
+
+            if cur.fetchone():
+                upsert_commercial_site(cur, l["url"], is_c)
+
+                # 🔎 HOMEPAGE META ENRICHMENT (ONE-TIME)
+                domain = extract_domain(l["url"])
+                cur.execute("""
+                    SELECT homepage_checked
+                    FROM commercial_sites
+                    WHERE commercial_domain = %s
+                """, (domain,))
+                cs = cur.fetchone()
+
+                if cs and not cs["homepage_checked"]:
+                    time.sleep(random.uniform(2.5, 4.0))
+                    title, desc, text = fetch_homepage_meta(domain)
+                    homepage_is_casino = detect_casino_from_text(
+                        f"{title or ''} {desc or ''} {text or ''}"
+                    )
+                    cur.execute("""
+                        UPDATE commercial_sites
+                        SET
+                            meta_title = %s,
+                            meta_description = %s,
+                            is_casino = %s,
+                            homepage_checked = TRUE
+                        WHERE commercial_domain = %s
+                    """, (title, desc, homepage_is_casino, domain))
+
+                saved += 1
+                casino += int(is_c)
+
+        conn.commit()
+
+    cur.close()
+    conn.close()
+
+    return {
+        "pages_scanned": len(pages),
+        "saved_links": saved,
+        "casino_links": casino,
+        "blocked_pages": blocked
+    }
