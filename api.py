@@ -35,7 +35,7 @@ session.headers.update(HEADERS)
 # =========================================================
 # APP
 # =========================================================
-app = FastAPI(title="Blog Lead Crawler API", version="1.2.7")
+app = FastAPI(title="Blog Lead Crawler API", version="1.2.8")
 
 app.add_middleware(
     CORSMiddleware,
@@ -97,33 +97,8 @@ def extract_domain(url: str) -> str:
 def is_casino_link(url: str) -> bool:
     return any(k in url.lower() for k in CASINO_KEYWORDS)
 
-def is_valid_commercial_link(href: str, blog_domain: str) -> bool:
-    if not href:
-        return False
-
-    href = href.strip().lower()
-
-    if href.startswith(("mailto:", "tel:", "#", "javascript:")):
-        return False
-
-    parsed = urlparse(href)
-    if not parsed.netloc:
-        return False
-
-    link_domain = parsed.netloc.replace("www.", "")
-    blog_domain = blog_domain.replace("www.", "")
-
-    if link_domain == blog_domain:
-        return False
-
-    for s in SOCIAL_DOMAINS:
-        if s in link_domain:
-            return False
-
-    return True
-
 # =========================================================
-# LINK EXTRACTION
+# LINK EXTRACTION (FIXED)
 # =========================================================
 def extract_outbound_links(page_url: str):
     try:
@@ -140,13 +115,27 @@ def extract_outbound_links(page_url: str):
         blog_domain = extract_domain(page_url)
 
         for a in soup.find_all("a", href=True):
-            full_url = urljoin(page_url, a["href"])
+            href = a["href"].strip()
 
-            if not is_valid_commercial_link(full_url, blog_domain):
+            # 🔥 BLOCK non-http links early
+            if href.startswith(("mailto:", "tel:", "#", "javascript:")):
                 continue
 
-            commercial_domain = extract_domain(full_url)
-            if not commercial_domain:
+            full_url = urljoin(page_url, href)
+            parsed = urlparse(full_url)
+
+            if not parsed.netloc:
+                continue
+
+            link_domain = parsed.netloc.lower().replace("www.", "")
+            blog_domain_clean = blog_domain.lower().replace("www.", "")
+
+            # 🔥 BLOCK internal links
+            if link_domain == blog_domain_clean:
+                continue
+
+            # 🔥 BLOCK social domains
+            if any(s in link_domain for s in SOCIAL_DOMAINS):
                 continue
 
             rel = a.get("rel", [])
@@ -158,7 +147,7 @@ def extract_outbound_links(page_url: str):
             })
 
         return links
-    except:
+    except Exception:
         return []
 
 def upsert_commercial_site(cur, url: str, is_casino: bool):
