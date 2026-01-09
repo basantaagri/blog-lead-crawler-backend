@@ -5,7 +5,6 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from datetime import datetime
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import os, requests, csv, io, time, random
@@ -15,7 +14,7 @@ import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-print("### BLOG LEAD CRAWLER — RESTORED SAFE VERSION RUNNING ###")
+print("### BLOG LEAD CRAWLER — SAFE PRODUCTION VERSION RUNNING ###")
 
 # =========================================================
 # GLOBAL HEADERS
@@ -138,24 +137,6 @@ def upsert_commercial_site(cur, url: str, is_casino: bool):
     """, (domain, is_casino))
 
 # =========================================================
-# HOMEPAGE ENRICHMENT
-# =========================================================
-def fetch_homepage_meta(domain: str):
-    try:
-        r = session.get("https://" + domain, timeout=15, verify=False)
-        soup = BeautifulSoup(r.text, "html.parser")
-        title = soup.title.string.strip() if soup.title and soup.title.string else ""
-        desc = soup.find("meta", attrs={"name": "description"})
-        description = desc["content"].strip() if desc and desc.get("content") else ""
-        text = soup.get_text(separator=" ").lower()
-        return title, description, text
-    except:
-        return None, None, None
-
-def detect_casino_from_text(text: str):
-    return any(k in text for k in CASINO_KEYWORDS) if text else False
-
-# =========================================================
 # CSV
 # =========================================================
 def rows_to_csv(rows):
@@ -181,7 +162,7 @@ def health():
     return {"status": "ok"}
 
 # =========================================================
-# ✅ FIXED HISTORY (ONLY CHANGE YOU ASKED FOR)
+# ✅ FIXED HISTORY (SCHEMA-ALIGNED)
 # =========================================================
 @app.get("/history")
 def history():
@@ -190,7 +171,7 @@ def history():
 
     cur.execute("""
         SELECT
-            b.blog_url,
+            root.blog_url,
             COUNT(DISTINCT bp.id) AS total_pages,
             COUNT(DISTINCT cs.commercial_domain) AS unique_commercial_sites,
             ROUND(
@@ -199,16 +180,18 @@ def history():
                 2
             ) AS dofollow_percentage,
             BOOL_OR(ol.is_casino) AS has_casino_links
-        FROM blogs b
+        FROM blog_pages root
         LEFT JOIN blog_pages bp
-            ON bp.blog_id = b.id AND bp.is_root = FALSE
+            ON bp.blog_url LIKE root.blog_url || '%'
+           AND bp.is_root = FALSE
         LEFT JOIN outbound_links ol
             ON ol.blog_page_id = bp.id
         LEFT JOIN commercial_sites cs
             ON ol.url LIKE '%' || cs.commercial_domain || '%'
-        WHERE b.first_crawled >= NOW() - INTERVAL '30 days'
-        GROUP BY b.blog_url
-        ORDER BY b.blog_url;
+        WHERE root.is_root = TRUE
+          AND root.first_crawled >= NOW() - INTERVAL '30 days'
+        GROUP BY root.blog_url
+        ORDER BY root.blog_url;
     """)
 
     rows = cur.fetchall()
@@ -231,7 +214,9 @@ def export_blog_page_links():
             ol.is_dofollow,
             ol.is_casino
         FROM blog_pages root
-        JOIN blog_pages bp ON bp.blog_url LIKE root.blog_url || '%' AND bp.is_root = FALSE
+        JOIN blog_pages bp
+          ON bp.blog_url LIKE root.blog_url || '%'
+         AND bp.is_root = FALSE
         JOIN outbound_links ol ON ol.blog_page_id = bp.id
         WHERE root.is_root = TRUE
         ORDER BY root.blog_url, bp.blog_url
@@ -255,8 +240,14 @@ def export_commercial_sites():
         FROM commercial_sites cs
         JOIN outbound_links ol ON ol.url LIKE '%' || cs.commercial_domain || '%'
         JOIN blog_pages bp ON bp.id = ol.blog_page_id
-        JOIN blog_pages root ON root.is_root = TRUE AND bp.blog_url LIKE root.blog_url || '%'
-        GROUP BY cs.commercial_domain, cs.total_links, cs.dofollow_percent, cs.is_casino
+        JOIN blog_pages root
+          ON root.is_root = TRUE
+         AND bp.blog_url LIKE root.blog_url || '%'
+        GROUP BY
+            cs.commercial_domain,
+            cs.total_links,
+            cs.dofollow_percent,
+            cs.is_casino
         ORDER BY cs.total_links DESC
     """)
     rows = cur.fetchall()
@@ -274,13 +265,17 @@ def export_blog_summary():
             COUNT(DISTINCT cs.commercial_domain) AS unique_commercial_sites,
             ROUND(
                 100.0 * SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END)
-                / NULLIF(COUNT(ol.id), 0), 2
+                / NULLIF(COUNT(ol.id), 0),
+                2
             ) AS dofollow_percentage,
             BOOL_OR(ol.is_casino) AS has_casino_links
         FROM blog_pages root
-        JOIN blog_pages bp ON bp.blog_url LIKE root.blog_url || '%' AND bp.is_root = FALSE
+        JOIN blog_pages bp
+          ON bp.blog_url LIKE root.blog_url || '%'
+         AND bp.is_root = FALSE
         JOIN outbound_links ol ON ol.blog_page_id = bp.id
-        JOIN commercial_sites cs ON ol.url LIKE '%' || cs.commercial_domain || '%'
+        JOIN commercial_sites cs
+          ON ol.url LIKE '%' || cs.commercial_domain || '%'
         WHERE root.is_root = TRUE
         GROUP BY root.blog_url
         ORDER BY root.blog_url
