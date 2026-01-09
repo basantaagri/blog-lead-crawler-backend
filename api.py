@@ -12,6 +12,10 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 import urllib3
 
+# ✅ SAFE ADDITIONS
+from threading import Thread
+from queue import Queue
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 print("### BLOG LEAD CRAWLER — SAFE PRODUCTION VERSION RUNNING ###")
@@ -134,6 +138,25 @@ def upsert_commercial_site(cur, url: str, is_casino: bool):
     """, (domain, is_casino))
 
 # =========================================================
+# ✅ BACKGROUND CRAWL QUEUE (SAFE ADDITION)
+# =========================================================
+crawl_queue = Queue()
+
+def crawl_worker():
+    while True:
+        blog_url = crawl_queue.get()
+        try:
+            print(f"[QUEUE] Crawling: {blog_url}")
+            crawl_links(CrawlRequest(blog_url=blog_url))
+            print(f"[QUEUE] Done: {blog_url}")
+        except Exception as e:
+            print(f"[QUEUE] Failed: {blog_url} | {e}")
+        finally:
+            crawl_queue.task_done()
+
+Thread(target=crawl_worker, daemon=True).start()
+
+# =========================================================
 # CSV
 # =========================================================
 def rows_to_csv(rows):
@@ -181,7 +204,7 @@ def crawl_blog(data: CrawlRequest):
     return {"status": "blog registered", "blog": blog_url}
 
 # =========================================================
-# POST /crawl-links
+# POST /crawl-links  (UNCHANGED – STILL SYNC)
 # =========================================================
 @app.post("/crawl-links")
 def crawl_links(data: CrawlRequest):
@@ -277,7 +300,7 @@ def history():
     return rows
 
 # =========================================================
-# EXPORTS
+# EXPORTS (UNCHANGED)
 # =========================================================
 @app.get("/export/blog-page-links")
 def export_blog_page_links():
