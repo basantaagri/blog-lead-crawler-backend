@@ -96,7 +96,7 @@ def is_casino_link(url: str) -> bool:
     return any(k in url.lower() for k in CASINO_KEYWORDS)
 
 # =========================================================
-# 🔥 PAGE DISCOVERY (FINAL, WORKING)
+# PAGE DISCOVERY (UNCHANGED)
 # =========================================================
 def discover_blog_pages(blog_url: str, cur):
     discovered = set()
@@ -120,13 +120,11 @@ def discover_blog_pages(blog_url: str, cur):
 
             soup = BeautifulSoup(r.text, "xml")
 
-            # Sitemap index
             for sm in soup.find_all("sitemap"):
                 loc = sm.find("loc")
                 if loc:
                     crawl_sitemap(loc.text.strip())
 
-            # URL sitemap
             for loc in soup.find_all("loc"):
                 if len(discovered) >= MAX_PAGES_PER_BLOG:
                     break
@@ -142,7 +140,6 @@ def discover_blog_pages(blog_url: str, cur):
         if discovered:
             break
 
-    # HTML fallback
     if not discovered:
         try:
             r = session.get(blog_url, timeout=15, verify=False)
@@ -166,7 +163,7 @@ def discover_blog_pages(blog_url: str, cur):
     return len(discovered)
 
 # =========================================================
-# LINK EXTRACTION
+# LINK EXTRACTION (UNCHANGED)
 # =========================================================
 def extract_outbound_links(page_url: str):
     try:
@@ -277,6 +274,9 @@ def crawl_blog(data: CrawlRequest):
         "pages_discovered": pages
     }
 
+# =========================================================
+# 🔥 ONLY FIX IS HERE 🔥
+# =========================================================
 @app.post("/crawl-links")
 def crawl_links(data: CrawlRequest):
     blog_url = normalize_blog_url(data.blog_url)
@@ -287,9 +287,9 @@ def crawl_links(data: CrawlRequest):
         SELECT id, blog_url
         FROM blog_pages
         WHERE is_root = FALSE
-          AND blog_url LIKE %s
+          AND blog_url ILIKE %s
         LIMIT 1000
-    """, (blog_url + "%",))
+    """, ("%" + extract_domain(blog_url) + "%",))
 
     pages = cur.fetchall()
     if not pages:
