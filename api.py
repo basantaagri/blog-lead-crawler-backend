@@ -13,6 +13,7 @@ from urllib.parse import urljoin, urlparse
 import urllib3
 from threading import Thread
 from queue import Queue
+from datetime import datetime, timedelta
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -96,7 +97,7 @@ def is_casino_link(url: str) -> bool:
     return any(k in url.lower() for k in CASINO_KEYWORDS)
 
 # =========================================================
-# PAGE DISCOVERY (UNCHANGED)
+# PAGE DISCOVERY
 # =========================================================
 def discover_blog_pages(blog_url: str, cur):
     discovered = set()
@@ -163,7 +164,7 @@ def discover_blog_pages(blog_url: str, cur):
     return len(discovered)
 
 # =========================================================
-# LINK EXTRACTION (UNCHANGED)
+# LINK EXTRACTION
 # =========================================================
 def extract_outbound_links(page_url: str):
     try:
@@ -274,9 +275,6 @@ def crawl_blog(data: CrawlRequest):
         "pages_discovered": pages
     }
 
-# =========================================================
-# 🔥 ONLY FIX IS HERE 🔥
-# =========================================================
 @app.post("/crawl-links")
 def crawl_links(data: CrawlRequest):
     blog_url = normalize_blog_url(data.blog_url)
@@ -316,3 +314,89 @@ def crawl_links(data: CrawlRequest):
     cur.close()
     conn.close()
     return {"status": "completed"}
+
+# =========================================================
+# EXPORTS / HISTORY / PROGRESS (RESTORED)
+# =========================================================
+@app.get("/history")
+def history():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT blog_url, first_crawled
+        FROM blog_pages
+        WHERE is_root = TRUE
+          AND first_crawled >= %s
+        ORDER BY first_crawled DESC
+    """, (datetime.utcnow() - timedelta(days=30),))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+@app.get("/export/blog-page-links")
+def export_blog_page_links():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT bp.blog_url AS blog_page, ol.url, ol.is_dofollow, ol.is_casino
+        FROM outbound_links ol
+        JOIN blog_pages bp ON bp.id = ol.blog_page_id
+    """)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=rows[0].keys())
+    writer.writeheader()
+    writer.writerows(rows)
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="text/csv")
+
+@app.get("/export/commercial-sites")
+def export_commercial_sites():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM commercial_sites")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=rows[0].keys())
+    writer.writeheader()
+    writer.writerows(rows)
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="text/csv")
+
+@app.get("/export/blog-summary")
+def export_blog_summary():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT
+            bp.blog_url,
+            COUNT(DISTINCT cs.commercial_domain) AS unique_commercial_sites,
+            AVG(ol.is_dofollow::int) * 100 AS dofollow_percent,
+            BOOL_OR(cs.is_casino) AS casino_present
+        FROM blog_pages bp
+        JOIN outbound_links ol ON ol.blog_page_id = bp.id
+        JOIN commercial_sites cs ON cs.commercial_domain = split_part(ol.url, '/', 3)
+        WHERE bp.is_root = TRUE
+        GROUP BY bp.blog_url
+    """)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=rows[0].keys())
+    writer.writeheader()
+    writer.writerows(rows)
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="text/csv")
+
+@app.get("/progress")
+def progress():
+    return {"status": "running"}
