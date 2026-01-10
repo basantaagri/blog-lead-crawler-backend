@@ -35,7 +35,7 @@ session.headers.update(HEADERS)
 # =========================================================
 # APP
 # =========================================================
-app = FastAPI(title="Blog Lead Crawler API", version="1.3.2")
+app = FastAPI(title="Blog Lead Crawler API", version="1.3.3")
 
 app.add_middleware(
     CORSMiddleware,
@@ -304,6 +304,9 @@ def export_blog_page_links():
     cur.close()
     conn.close()
 
+    if not rows:
+        return StreamingResponse(io.StringIO("blog_page,url,is_dofollow,is_casino\n"), media_type="text/csv")
+
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=rows[0].keys())
     writer.writeheader()
@@ -320,6 +323,9 @@ def export_commercial_sites():
     cur.close()
     conn.close()
 
+    if not rows:
+        return StreamingResponse(io.StringIO("commercial_domain,total_links,dofollow_percent,is_casino\n"), media_type="text/csv")
+
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=rows[0].keys())
     writer.writeheader()
@@ -328,12 +334,13 @@ def export_commercial_sites():
     return StreamingResponse(buf, media_type="text/csv")
 
 # =========================================================
-# ✅ FIXED BLOG SUMMARY (POSTGRES SAFE)
+# ✅ BLOG SUMMARY — POSTGRES SAFE (FINAL FIX)
 # =========================================================
 @app.get("/export/blog-summary")
 def export_blog_summary():
     conn = get_db()
     cur = conn.cursor()
+
     cur.execute("""
         SELECT
             root.blog_url AS blog,
@@ -346,18 +353,26 @@ def export_blog_summary():
             BOOL_OR(ol.is_casino) AS has_casino_links
         FROM blog_pages root
         JOIN blog_pages bp
-          ON bp.blog_url ILIKE '%' || extract_domain(root.blog_url) || '%'
-         AND bp.is_root = FALSE
+          ON bp.is_root = FALSE
+         AND bp.blog_url ILIKE '%' || replace(replace(root.blog_url,'https://',''),'http://','') || '%'
         JOIN outbound_links ol ON ol.blog_page_id = bp.id
         LEFT JOIN commercial_sites cs
-          ON ol.url ILIKE '%' || cs.commercial_domain || '%'
+          ON cs.commercial_domain =
+             split_part(replace(replace(ol.url,'https://',''),'http://',''), '/', 1)
         WHERE root.is_root = TRUE
         GROUP BY root.blog_url
         ORDER BY root.blog_url
     """)
+
     rows = cur.fetchall()
     cur.close()
     conn.close()
+
+    if not rows:
+        return StreamingResponse(
+            io.StringIO("blog,unique_commercial_sites,total_commercial_links,dofollow_percent,has_casino_links\n"),
+            media_type="text/csv"
+        )
 
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=rows[0].keys())
