@@ -84,7 +84,6 @@ SOCIAL_DOMAINS = {
 }
 
 MAX_PAGES_PER_BLOG = 1000
-MONTHS_LIMIT = 12
 
 # =========================================================
 # HELPERS
@@ -101,18 +100,17 @@ def is_casino_link(url: str) -> bool:
     return any(k in url.lower() for k in CASINO_KEYWORDS)
 
 # =========================================================
-# PAGE DISCOVERY (🔥 CORE FIX)
+# 🔥 PAGE DISCOVERY — ONLY NEW LOGIC
 # =========================================================
-def discover_blog_pages(blog_url: str, cur, conn):
-    sitemap_urls = [
+def discover_blog_pages(blog_url: str, cur):
+    sitemap_candidates = [
         blog_url + "/sitemap.xml",
         blog_url + "/sitemap_index.xml"
     ]
 
     discovered = 0
-    cutoff_date = datetime.utcnow() - timedelta(days=30 * MONTHS_LIMIT)
 
-    for sitemap in sitemap_urls:
+    for sitemap in sitemap_candidates:
         try:
             r = session.get(sitemap, timeout=20, verify=False)
             if r.status_code != 200:
@@ -126,6 +124,9 @@ def discover_blog_pages(blog_url: str, cur, conn):
 
                 page_url = loc.text.strip()
 
+                if not page_url.startswith(blog_url):
+                    continue
+
                 cur.execute("""
                     INSERT INTO blog_pages (blog_url, is_root)
                     VALUES (%s, FALSE)
@@ -133,9 +134,8 @@ def discover_blog_pages(blog_url: str, cur, conn):
                 """, (page_url,))
                 discovered += 1
 
-            conn.commit()
             if discovered > 0:
-                return discovered
+                break
 
         except Exception:
             continue
@@ -143,7 +143,7 @@ def discover_blog_pages(blog_url: str, cur, conn):
     return discovered
 
 # =========================================================
-# LINK EXTRACTION
+# LINK EXTRACTION (UNCHANGED)
 # =========================================================
 def extract_outbound_links(page_url: str):
     try:
@@ -205,7 +205,7 @@ def upsert_commercial_site(cur, url: str, is_casino: bool):
     """, (domain, is_casino))
 
 # =========================================================
-# QUEUE WORKER
+# QUEUE WORKER (UNCHANGED)
 # =========================================================
 crawl_queue = Queue()
 
@@ -250,15 +250,17 @@ def crawl_blog(data: CrawlRequest):
     conn = get_db()
     cur = conn.cursor()
 
+    # Save root blog
     cur.execute("""
         INSERT INTO blog_pages (blog_url, is_root)
         VALUES (%s, TRUE)
         ON CONFLICT (blog_url) DO NOTHING
     """, (blog_url,))
+
+    # 🔥 DISCOVER BLOG PAGES (FIX)
+    pages = discover_blog_pages(blog_url, cur)
+
     conn.commit()
-
-    pages = discover_blog_pages(blog_url, cur, conn)
-
     cur.close()
     conn.close()
 
@@ -309,9 +311,8 @@ def crawl_links(data: CrawlRequest):
     return {"status": "completed"}
 
 # =========================================================
-# EXPORTS / HISTORY / PROGRESS (UNCHANGED)
+# EXPORTS / HISTORY / PROGRESS — UNCHANGED
 # =========================================================
-# (kept exactly same logic as your original – safe)
 
 @app.get("/history")
 def history():
