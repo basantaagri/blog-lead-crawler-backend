@@ -113,12 +113,10 @@ def discover_blog_pages(blog_url: str, cur):
         if url in visited or len(discovered) >= MAX_PAGES_PER_BLOG:
             return
         visited.add(url)
-
         try:
             r = session.get(url, timeout=20, verify=False)
             if r.status_code != 200:
                 return
-
             soup = BeautifulSoup(r.text, "xml")
 
             for sm in soup.find_all("sitemap"):
@@ -132,7 +130,6 @@ def discover_blog_pages(blog_url: str, cur):
                 page = loc.text.strip()
                 if page.startswith(blog_url):
                     discovered.add(page)
-
         except Exception:
             return
 
@@ -170,7 +167,6 @@ def extract_outbound_links(page_url: str):
     try:
         r = session.get(page_url, timeout=15, verify=False)
         html = r.text.lower()
-
         for sig in BLOCK_SIGNATURES:
             if sig in html:
                 return "BLOCKED"
@@ -192,7 +188,6 @@ def extract_outbound_links(page_url: str):
             link_domain = parsed.netloc.lower().replace("www.", "")
             if link_domain == blog_domain:
                 continue
-
             if any(s in link_domain for s in SOCIAL_DOMAINS):
                 continue
 
@@ -203,7 +198,6 @@ def extract_outbound_links(page_url: str):
                 "url": full_url,
                 "is_dofollow": is_dofollow
             })
-
         return links
     except Exception:
         return []
@@ -212,7 +206,6 @@ def upsert_commercial_site(cur, url: str, is_casino: bool):
     domain = extract_domain(url)
     if not domain:
         return
-
     cur.execute("""
         INSERT INTO commercial_sites
         (commercial_domain, total_links, dofollow_percent, is_casino)
@@ -222,21 +215,6 @@ def upsert_commercial_site(cur, url: str, is_casino: bool):
             total_links = commercial_sites.total_links + 1,
             is_casino = commercial_sites.is_casino OR EXCLUDED.is_casino
     """, (domain, is_casino))
-
-# =========================================================
-# QUEUE WORKER
-# =========================================================
-crawl_queue = Queue()
-
-def crawl_worker():
-    while True:
-        blog_url = crawl_queue.get()
-        try:
-            crawl_links(CrawlRequest(blog_url=blog_url))
-        finally:
-            crawl_queue.task_done()
-
-Thread(target=crawl_worker, daemon=True).start()
 
 # =========================================================
 # MODELS
@@ -264,16 +242,11 @@ def crawl_blog(data: CrawlRequest):
     """, (blog_url,))
 
     pages = discover_blog_pages(blog_url, cur)
-
     conn.commit()
     cur.close()
     conn.close()
 
-    return {
-        "status": "blog registered",
-        "blog": blog_url,
-        "pages_discovered": pages
-    }
+    return {"status": "blog registered", "blog": blog_url, "pages_discovered": pages}
 
 @app.post("/crawl-links")
 def crawl_links(data: CrawlRequest):
@@ -316,21 +289,55 @@ def crawl_links(data: CrawlRequest):
     return {"status": "completed"}
 
 # =========================================================
-# EXPORTS (FIXED BLOG SUMMARY ONLY)
+# EXPORTS (RESTORED)
 # =========================================================
+@app.get("/export/blog-page-links")
+def export_blog_page_links():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT bp.blog_url AS blog_page, ol.url, ol.is_dofollow, ol.is_casino
+        FROM outbound_links ol
+        JOIN blog_pages bp ON bp.id = ol.blog_page_id
+    """)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=rows[0].keys())
+    writer.writeheader()
+    writer.writerows(rows)
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="text/csv")
+
+@app.get("/export/commercial-sites")
+def export_commercial_sites():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM commercial_sites")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=rows[0].keys())
+    writer.writeheader()
+    writer.writerows(rows)
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="text/csv")
+
 @app.get("/export/blog-summary")
 def export_blog_summary():
     conn = get_db()
     cur = conn.cursor()
-
     cur.execute("""
         SELECT
             root.blog_url AS blog,
             COUNT(DISTINCT cs.commercial_domain) AS unique_commercial_sites,
             ROUND(
                 100.0 * SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END)
-                / NULLIF(COUNT(ol.id), 0),
-                2
+                / NULLIF(COUNT(ol.id), 0), 2
             ) AS dofollow_percent,
             BOOL_OR(ol.is_casino) AS has_casino_links
         FROM blog_pages root
@@ -343,7 +350,6 @@ def export_blog_summary():
         GROUP BY root.blog_url
         ORDER BY root.blog_url
     """)
-
     rows = cur.fetchall()
     cur.close()
     conn.close()
@@ -354,3 +360,38 @@ def export_blog_summary():
     writer.writerows(rows)
     buf.seek(0)
     return StreamingResponse(buf, media_type="text/csv")
+
+@app.get("/history")
+def history():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT blog_url, first_crawled
+        FROM blog_pages
+        WHERE is_root = TRUE
+          AND first_crawled >= %s
+        ORDER BY first_crawled DESC
+    """, (datetime.utcnow() - timedelta(days=30),))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+@app.get("/progress")
+def progress():
+    return {"status": "running"}
+
+# =========================================================
+# START WORKER (AFTER ALL ROUTES)
+# =========================================================
+crawl_queue = Queue()
+
+def crawl_worker():
+    while True:
+        blog_url = crawl_queue.get()
+        try:
+            crawl_links(CrawlRequest(blog_url=blog_url))
+        finally:
+            crawl_queue.task_done()
+
+Thread(target=crawl_worker, daemon=True).start()
