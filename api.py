@@ -63,7 +63,7 @@ def get_db():
 # =========================================================
 CASINO_KEYWORDS = [
     "casino", "bet", "betting", "poker", "slots",
-    "sportsbook", "gambling", "roulette", "blackjack"
+    "sportsbook", "gambling", "roulette", "blackjack",
 ]
 
 BLOCK_SIGNATURES = [
@@ -93,10 +93,10 @@ def extract_domain(url: str) -> str:
     return urlparse(url).netloc.lower().replace("www.", "")
 
 def is_casino_link(url: str) -> bool:
-    return any(k in url.lower() guaranteeing correctness for k in CASINO_KEYWORDS)
+    return any(k in url.lower() for k in CASINO_KEYWORDS)
 
 # =========================================================
-# 🔥 REAL PAGE DISCOVERY (THE FIX THAT MAKES EVERYTHING WORK)
+# 🔥 PAGE DISCOVERY (FINAL, WORKING)
 # =========================================================
 def discover_blog_pages(blog_url: str, cur):
     discovered = set()
@@ -121,13 +121,10 @@ def discover_blog_pages(blog_url: str, cur):
             soup = BeautifulSoup(r.text, "xml")
 
             # Sitemap index
-            sitemap_nodes = soup.find_all("sitemap")
-            if sitemap_nodes:
-                for sm in sitemap_nodes:
-                    loc = sm.find("loc")
-                    if loc:
-                        crawl_sitemap(loc.text.strip())
-                return
+            for sm in soup.find_all("sitemap"):
+                loc = sm.find("loc")
+                if loc:
+                    crawl_sitemap(loc.text.strip())
 
             # URL sitemap
             for loc in soup.find_all("loc"):
@@ -140,20 +137,18 @@ def discover_blog_pages(blog_url: str, cur):
         except Exception:
             return
 
-    # Try sitemaps
     for seed in sitemap_seeds:
         crawl_sitemap(seed)
         if discovered:
             break
 
-    # Fallback: homepage internal links
+    # HTML fallback
     if not discovered:
         try:
             r = session.get(blog_url, timeout=15, verify=False)
             soup = BeautifulSoup(r.text, "html.parser")
             for a in soup.find_all("a", href=True):
-                href = a["href"].strip()
-                full = urljoin(blog_url, href)
+                full = urljoin(blog_url, a["href"])
                 if extract_domain(full) == extract_domain(blog_url):
                     discovered.add(full)
                 if len(discovered) >= MAX_PAGES_PER_BLOG:
@@ -171,7 +166,7 @@ def discover_blog_pages(blog_url: str, cur):
     return len(discovered)
 
 # =========================================================
-# LINK EXTRACTION (UNCHANGED)
+# LINK EXTRACTION
 # =========================================================
 def extract_outbound_links(page_url: str):
     try:
@@ -206,7 +201,10 @@ def extract_outbound_links(page_url: str):
             rel = a.get("rel", [])
             is_dofollow = "nofollow" not in [r.lower() for r in rel]
 
-            links.append({"url": full_url, "is_dofollow": is_dofollow})
+            links.append({
+                "url": full_url,
+                "is_dofollow": is_dofollow
+            })
 
         return links
     except Exception:
@@ -228,7 +226,7 @@ def upsert_commercial_site(cur, url: str, is_casino: bool):
     """, (domain, is_casino))
 
 # =========================================================
-# QUEUE WORKER (UNCHANGED)
+# QUEUE WORKER
 # =========================================================
 crawl_queue = Queue()
 
@@ -241,18 +239,6 @@ def crawl_worker():
             crawl_queue.task_done()
 
 Thread(target=crawl_worker, daemon=True).start()
-
-# =========================================================
-# CSV
-# =========================================================
-def rows_to_csv(rows):
-    buf = io.StringIO()
-    if rows:
-        writer = csv.DictWriter(buf, fieldnames=rows[0].keys())
-        writer.writeheader()
-        writer.writerows(rows)
-    buf.seek(0)
-    return StreamingResponse(buf, media_type="text/csv")
 
 # =========================================================
 # MODELS
