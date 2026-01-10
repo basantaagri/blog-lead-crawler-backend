@@ -289,7 +289,7 @@ def crawl_links(data: CrawlRequest):
     return {"status": "completed"}
 
 # =========================================================
-# EXPORTS (RESTORED)
+# EXPORTS
 # =========================================================
 @app.get("/export/blog-page-links")
 def export_blog_page_links():
@@ -327,6 +327,9 @@ def export_commercial_sites():
     buf.seek(0)
     return StreamingResponse(buf, media_type="text/csv")
 
+# =========================================================
+# ✅ FIXED BLOG SUMMARY (POSTGRES SAFE)
+# =========================================================
 @app.get("/export/blog-summary")
 def export_blog_summary():
     conn = get_db()
@@ -335,6 +338,7 @@ def export_blog_summary():
         SELECT
             root.blog_url AS blog,
             COUNT(DISTINCT cs.commercial_domain) AS unique_commercial_sites,
+            COUNT(DISTINCT ol.url) AS total_commercial_links,
             ROUND(
                 100.0 * SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END)
                 / NULLIF(COUNT(ol.id), 0), 2
@@ -345,7 +349,8 @@ def export_blog_summary():
           ON bp.blog_url ILIKE '%' || extract_domain(root.blog_url) || '%'
          AND bp.is_root = FALSE
         JOIN outbound_links ol ON ol.blog_page_id = bp.id
-        JOIN commercial_sites cs ON cs.commercial_domain = extract_domain(ol.url)
+        LEFT JOIN commercial_sites cs
+          ON ol.url ILIKE '%' || cs.commercial_domain || '%'
         WHERE root.is_root = TRUE
         GROUP BY root.blog_url
         ORDER BY root.blog_url
@@ -382,7 +387,7 @@ def progress():
     return {"status": "running"}
 
 # =========================================================
-# START WORKER (AFTER ALL ROUTES)
+# WORKER
 # =========================================================
 crawl_queue = Queue()
 
