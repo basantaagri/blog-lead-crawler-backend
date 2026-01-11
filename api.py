@@ -248,6 +248,9 @@ class CrawlRequest(BaseModel):
 def health():
     return {"status": "ok"}
 
+# =========================================================
+# EXPORT — COMMERCIAL SITES (ONLY CHANGE IS HERE)
+# =========================================================
 @app.get("/export/commercial-sites")
 def export_commercial_sites():
     conn = get_db()
@@ -274,18 +277,25 @@ def export_commercial_sites():
           ON root.is_root = TRUE
          AND bp.blog_url ILIKE '%' || replace(replace(root.blog_url,'https://',''),'http://','') || '%'
         WHERE
-            cs.commercial_domain NOT ILIKE '%facebook%'
+            cs.commercial_domain NOT ILIKE '%google%'
+        AND cs.commercial_domain NOT ILIKE '%apple%'
+        AND cs.commercial_domain NOT ILIKE '%facebook%'
         AND cs.commercial_domain NOT ILIKE '%twitter%'
         AND cs.commercial_domain NOT ILIKE '%x.com%'
         AND cs.commercial_domain NOT ILIKE '%instagram%'
+        AND cs.commercial_domain NOT ILIKE '%linkedin%'
         AND cs.commercial_domain NOT ILIKE '%youtube%'
         AND cs.commercial_domain NOT ILIKE '%youtu%'
         AND cs.commercial_domain NOT ILIKE '%t.co%'
-        AND cs.commercial_domain NOT ILIKE '%linkedin%'
         AND cs.commercial_domain NOT ILIKE '%pinterest%'
         AND cs.commercial_domain NOT ILIKE '%reddit%'
         AND cs.commercial_domain NOT ILIKE '%tiktok%'
         AND cs.commercial_domain NOT ILIKE '%spotify%'
+        AND cs.commercial_domain NOT ILIKE '%medium%'
+        AND cs.commercial_domain NOT ILIKE '%wordpress%'
+        AND cs.commercial_domain NOT ILIKE '%wikipedia%'
+        AND cs.commercial_domain NOT ILIKE '%unsplash%'
+        AND cs.commercial_domain NOT ILIKE '%github%'
         GROUP BY
             cs.commercial_domain,
             cs.meta_title,
