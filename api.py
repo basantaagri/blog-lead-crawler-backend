@@ -54,7 +54,7 @@ def health():
     return {"status": "ok"}
 
 # =========================================================
-# CRAWL BLOG (ROOT + POSTS)
+# CRAWL BLOG (ROOT)
 # =========================================================
 @app.post("/crawl")
 def crawl_blog(req: CrawlRequest):
@@ -76,11 +76,10 @@ def crawl_blog(req: CrawlRequest):
     return {"status": "blog stored"}
 
 # =========================================================
-# CRAWL LINKS (POSTS → OUTBOUND LINKS)
+# CRAWL LINKS (WORKER HANDLED)
 # =========================================================
 @app.post("/crawl-links")
 def crawl_links(req: CrawlRequest):
-    # Logic already exists in your crawler worker
     return {"status": "link crawling started"}
 
 # =========================================================
@@ -118,7 +117,7 @@ def export_blog_page_links():
     return StreamingResponse(buf, media_type="text/csv")
 
 # =========================================================
-# EXPORT — COMMERCIAL SITES (ONLY FIX APPLIED HERE)
+# EXPORT — COMMERCIAL SITES (✅ FIXED)
 # =========================================================
 @app.get("/export/commercial-sites")
 def export_commercial_sites():
@@ -146,20 +145,7 @@ def export_commercial_sites():
           ON root.is_root = TRUE
          AND bp.blog_url ILIKE '%' || replace(replace(root.blog_url,'https://',''),'http://','') || '%'
         WHERE
-            cs.commercial_domain NOT ILIKE '%facebook%'
-        AND cs.commercial_domain NOT ILIKE '%instagram%'
-        AND cs.commercial_domain NOT ILIKE '%twitter%'
-        AND cs.commercial_domain NOT ILIKE '%t.co%'
-        AND cs.commercial_domain NOT ILIKE '%youtube%'
-        AND cs.commercial_domain NOT ILIKE '%youtu%'
-        AND cs.commercial_domain NOT ILIKE '%pinterest%'
-        AND cs.commercial_domain NOT ILIKE '%reddit%'
-        AND cs.commercial_domain NOT ILIKE '%linkedin%'
-        AND cs.commercial_domain NOT ILIKE '%whatsapp%'
-        AND cs.commercial_domain NOT ILIKE '%bsky%'
-        AND cs.commercial_domain NOT ILIKE '%spotify%'
-        AND cs.commercial_domain NOT ILIKE '%google%'
-        AND cs.commercial_domain NOT ILIKE '%apple%'
+            bp.first_crawled >= NOW() - INTERVAL '12 months'
         GROUP BY
             cs.commercial_domain,
             cs.meta_title,
