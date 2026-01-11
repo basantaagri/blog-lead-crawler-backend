@@ -358,7 +358,7 @@ def export_commercial_sites():
         WHERE cs.commercial_domain NOT IN (
             'facebook.com','twitter.com','x.com','instagram.com',
             'youtube.com','youtu.be','t.co','linkedin.com',
-            'pinterest.com','reddit.com'
+            'pinterest.com','reddit.com','whatsapp.com','bsky.app'
         )
         GROUP BY
             cs.commercial_domain,
