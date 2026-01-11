@@ -248,88 +248,6 @@ class CrawlRequest(BaseModel):
 def health():
     return {"status": "ok"}
 
-@app.post("/crawl")
-def crawl_blog(data: CrawlRequest):
-    blog_url = normalize_blog_url(data.blog_url)
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        INSERT INTO blog_pages (blog_url, is_root)
-        VALUES (%s, TRUE)
-        ON CONFLICT (blog_url) DO NOTHING
-    """, (blog_url,))
-
-    pages = discover_blog_pages(blog_url, cur)
-    conn.commit()
-    cur.close()
-    conn.close()
-
-    return {"status": "blog registered", "blog": blog_url, "pages_discovered": pages}
-
-@app.post("/crawl-links")
-def crawl_links(data: CrawlRequest):
-    blog_url = normalize_blog_url(data.blog_url)
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT id, blog_url
-        FROM blog_pages
-        WHERE is_root = FALSE
-          AND blog_url ILIKE %s
-        LIMIT 1000
-    """, ("%" + extract_domain(blog_url) + "%",))
-
-    pages = cur.fetchall()
-    if not pages:
-        raise HTTPException(404, "No pages found. Run crawl first.")
-
-    for p in pages:
-        time.sleep(random.uniform(0.8, 1.5))
-        links = extract_outbound_links(p["blog_url"])
-        if links == "BLOCKED":
-            continue
-
-        for l in links:
-            is_c = is_casino_link(l["url"])
-            cur.execute("""
-                INSERT INTO outbound_links
-                (blog_page_id, url, is_casino, is_dofollow)
-                VALUES (%s,%s,%s,%s)
-                ON CONFLICT DO NOTHING
-            """, (p["id"], l["url"], is_c, l["is_dofollow"]))
-            upsert_commercial_site(cur, l["url"], is_c)
-
-        conn.commit()
-
-    cur.close()
-    conn.close()
-    return {"status": "completed"}
-
-# =========================================================
-# EXPORTS
-# =========================================================
-@app.get("/export/blog-page-links")
-def export_blog_page_links():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT bp.blog_url AS blog_page, ol.url, ol.is_dofollow, ol.is_casino
-        FROM outbound_links ol
-        JOIN blog_pages bp ON bp.id = ol.blog_page_id
-    """)
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-
-    buf = io.StringIO()
-    writer = csv.DictWriter(buf, fieldnames=rows[0].keys())
-    writer.writeheader()
-    writer.writerows(rows)
-    buf.seek(0)
-    return StreamingResponse(buf, media_type="text/csv")
-
 @app.get("/export/commercial-sites")
 def export_commercial_sites():
     conn = get_db()
@@ -355,11 +273,19 @@ def export_commercial_sites():
         JOIN blog_pages root
           ON root.is_root = TRUE
          AND bp.blog_url ILIKE '%' || replace(replace(root.blog_url,'https://',''),'http://','') || '%'
-        WHERE cs.commercial_domain NOT IN (
-            'facebook.com','twitter.com','x.com','instagram.com',
-            'youtube.com','youtu.be','t.co','linkedin.com',
-            'pinterest.com','reddit.com','whatsapp.com','bsky.app'
-        )
+        WHERE
+            cs.commercial_domain NOT ILIKE '%facebook%'
+        AND cs.commercial_domain NOT ILIKE '%twitter%'
+        AND cs.commercial_domain NOT ILIKE '%x.com%'
+        AND cs.commercial_domain NOT ILIKE '%instagram%'
+        AND cs.commercial_domain NOT ILIKE '%youtube%'
+        AND cs.commercial_domain NOT ILIKE '%youtu%'
+        AND cs.commercial_domain NOT ILIKE '%t.co%'
+        AND cs.commercial_domain NOT ILIKE '%linkedin%'
+        AND cs.commercial_domain NOT ILIKE '%pinterest%'
+        AND cs.commercial_domain NOT ILIKE '%reddit%'
+        AND cs.commercial_domain NOT ILIKE '%tiktok%'
+        AND cs.commercial_domain NOT ILIKE '%spotify%'
         GROUP BY
             cs.commercial_domain,
             cs.meta_title,
@@ -378,112 +304,3 @@ def export_commercial_sites():
     writer.writerows(rows)
     buf.seek(0)
     return StreamingResponse(buf, media_type="text/csv")
-
-@app.get("/export/blog-summary")
-def export_blog_summary():
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT
-            root.blog_url AS blog,
-            COUNT(DISTINCT cs.commercial_domain) AS unique_commercial_sites,
-            COUNT(DISTINCT ol.url) AS total_commercial_links,
-            ROUND(
-                100.0 * SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END)
-                / NULLIF(COUNT(ol.id), 0), 2
-            ) AS dofollow_percent,
-            BOOL_OR(ol.is_casino) AS has_casino_links
-        FROM blog_pages root
-        JOIN blog_pages bp
-          ON bp.is_root = FALSE
-         AND bp.blog_url ILIKE '%' || replace(replace(root.blog_url,'https://',''),'http://','') || '%'
-        JOIN outbound_links ol ON ol.blog_page_id = bp.id
-        LEFT JOIN commercial_sites cs
-          ON cs.commercial_domain =
-             split_part(replace(replace(ol.url,'https://',''),'http://',''), '/', 1)
-        WHERE root.is_root = TRUE
-        GROUP BY root.blog_url
-        ORDER BY root.blog_url
-    """)
-
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-
-    buf = io.StringIO()
-    writer = csv.DictWriter(buf, fieldnames=rows[0].keys())
-    writer.writeheader()
-    writer.writerows(rows)
-    buf.seek(0)
-    return StreamingResponse(buf, media_type="text/csv")
-
-# =========================================================
-# COMMERCIAL SITE ENRICHMENT
-# =========================================================
-def enrich_commercial_site(cur, domain: str):
-    try:
-        r = session.get("https://" + domain, timeout=15, verify=False)
-        soup = BeautifulSoup(r.text, "html.parser")
-
-        title = soup.title.string.strip() if soup.title else None
-        desc = soup.find("meta", attrs={"name": "description"})
-        description = desc["content"].strip() if desc else None
-
-        text = " ".join([title or "", description or "", soup.get_text(" ")]).lower()
-        is_casino_homepage = any(k in text for k in CASINO_KEYWORDS)
-
-        cur.execute("""
-            UPDATE commercial_sites
-            SET
-                meta_title = %s,
-                meta_description = %s,
-                is_casino = is_casino OR %s,
-                homepage_checked = TRUE
-            WHERE commercial_domain = %s
-        """, (title, description, is_casino_homepage, domain))
-
-    except Exception:
-        cur.execute("""
-            UPDATE commercial_sites
-            SET homepage_checked = TRUE
-            WHERE commercial_domain = %s
-        """, (domain,))
-
-@app.post("/enrich/commercial-sites")
-def enrich_commercial_sites(limit: int = 25):
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT commercial_domain
-        FROM commercial_sites
-        WHERE homepage_checked = FALSE
-        LIMIT %s
-    """, (limit,))
-
-    rows = cur.fetchall()
-
-    for r in rows:
-        enrich_commercial_site(cur, r["commercial_domain"])
-        conn.commit()
-        time.sleep(random.uniform(0.6, 1.2))
-
-    cur.close()
-    conn.close()
-    return {"status": "enriched", "processed": len(rows)}
-
-# =========================================================
-# WORKER
-# =========================================================
-crawl_queue = Queue()
-
-def crawl_worker():
-    while True:
-        blog_url = crawl_queue.get()
-        try:
-            crawl_links(CrawlRequest(blog_url=blog_url))
-        finally:
-            crawl_queue.task_done()
-
-Thread(target=crawl_worker, daemon=True).start()
