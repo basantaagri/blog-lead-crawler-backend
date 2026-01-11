@@ -355,6 +355,11 @@ def export_commercial_sites():
         JOIN blog_pages root
           ON root.is_root = TRUE
          AND bp.blog_url ILIKE '%' || replace(replace(root.blog_url,'https://',''),'http://','') || '%'
+        WHERE cs.commercial_domain NOT IN (
+            'facebook.com','twitter.com','x.com','instagram.com',
+            'youtube.com','youtu.be','t.co','linkedin.com',
+            'pinterest.com','reddit.com'
+        )
         GROUP BY
             cs.commercial_domain,
             cs.meta_title,
