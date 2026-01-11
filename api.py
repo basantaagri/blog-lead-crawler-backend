@@ -46,41 +46,6 @@ class CrawlRequest(BaseModel):
     blog_url: str
 
 # =========================================================
-# ✅ CASINO DETECTION LOGIC (ADDED — NOT WIRED YET)
-# =========================================================
-def is_casino_site(title: str, description: str, anchors: list[str]) -> bool:
-    casino_keywords = [
-        "casino", "betting", "sportsbook", "slots", "poker",
-        "roulette", "blackjack", "gambling", "bet now", "play now"
-    ]
-
-    negative_keywords = [
-        "software", "platform", "marketing", "crm", "analytics",
-        "time tracking", "design tool", "research", "consulting",
-        "saas", "productivity", "cloud", "enterprise"
-    ]
-
-    haystacks = []
-
-    if title:
-        haystacks.append(title.lower())
-
-    if description:
-        haystacks.append(description.lower())
-
-    for a in anchors or []:
-        haystacks.append(a.lower())
-
-    text = " ".join(haystacks)
-
-    # Hard negative filter (prevents SaaS false positives)
-    if any(neg in text for neg in negative_keywords):
-        return False
-
-    # Positive casino signal
-    return any(pos in text for pos in casino_keywords)
-
-# =========================================================
 # HEALTH
 # =========================================================
 @app.get("/")
