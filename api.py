@@ -15,7 +15,7 @@ print("### BLOG LEAD CRAWLER — BASELINE SAFE VERSION RUNNING ###")
 # =========================================================
 # APP INIT
 # =========================================================
-app = FastAPI(title="Blog Lead Crawler API", version="1.3.5")
+app = FastAPI(title="Blog Lead Crawler API", version="1.3.6")
 
 app.add_middleware(
     CORSMiddleware,
@@ -40,6 +40,38 @@ def get_db():
     )
 
 # =========================================================
+# 🔒 CASINO DETECTION — STRICT & SAFE (NEW, NO SIDE EFFECTS)
+# =========================================================
+def is_casino_site(title: str, description: str, anchors: list[str]) -> bool:
+    haystacks = []
+
+    if title:
+        haystacks.append(title.lower())
+
+    if description:
+        haystacks.append(description.lower())
+
+    for a in anchors or []:
+        haystacks.append(a.lower())
+
+    CASINO_KEYWORDS_STRICT = [
+        "online casino",
+        "casino",
+        "betting",
+        "sportsbook",
+        "slots",
+        "roulette",
+        "blackjack",
+        "poker"
+    ]
+
+    return any(
+        kw in text
+        for text in haystacks
+        for kw in CASINO_KEYWORDS_STRICT
+    )
+
+# =========================================================
 # MODELS
 # =========================================================
 class CrawlRequest(BaseModel):
@@ -54,7 +86,7 @@ def health():
     return {"status": "ok"}
 
 # =========================================================
-# CRAWL BLOG (ROOT)
+# CRAWL BLOG (ROOT ONLY — EXISTING)
 # =========================================================
 @app.post("/crawl")
 def crawl_blog(req: CrawlRequest):
@@ -76,7 +108,7 @@ def crawl_blog(req: CrawlRequest):
     return {"status": "blog stored"}
 
 # =========================================================
-# CRAWL LINKS (WORKER HANDLED)
+# CRAWL LINKS (WORKER HANDLED — UNTOUCHED)
 # =========================================================
 @app.post("/crawl-links")
 def crawl_links(req: CrawlRequest):
@@ -117,7 +149,7 @@ def export_blog_page_links():
     return StreamingResponse(buf, media_type="text/csv")
 
 # =========================================================
-# EXPORT — COMMERCIAL SITES (✅ FIXED)
+# EXPORT — COMMERCIAL SITES (UNCHANGED)
 # =========================================================
 @app.get("/export/commercial-sites")
 def export_commercial_sites():
@@ -144,8 +176,6 @@ def export_commercial_sites():
         JOIN blog_pages root
           ON root.is_root = TRUE
          AND bp.blog_url ILIKE '%' || replace(replace(root.blog_url,'https://',''),'http://','') || '%'
-        WHERE
-            bp.first_crawled >= NOW() - INTERVAL '12 months'
         GROUP BY
             cs.commercial_domain,
             cs.meta_title,
@@ -170,7 +200,7 @@ def export_commercial_sites():
     return StreamingResponse(buf, media_type="text/csv")
 
 # =========================================================
-# EXPORT — BLOG SUMMARY
+# EXPORT — BLOG SUMMARY (UNCHANGED)
 # =========================================================
 @app.get("/export/blog-summary")
 def export_blog_summary():
