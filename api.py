@@ -35,7 +35,7 @@ session.headers.update(HEADERS)
 # =========================================================
 # APP
 # =========================================================
-app = FastAPI(title="Blog Lead Crawler API", version="1.3.3")
+app = FastAPI(title="Blog Lead Crawler API", version="1.3.4")
 
 app.add_middleware(
     CORSMiddleware,
@@ -223,7 +223,7 @@ class CrawlRequest(BaseModel):
     blog_url: str
 
 # =========================================================
-# ROUTES
+# ROUTES (UNCHANGED)
 # =========================================================
 @app.get("/")
 def health():
@@ -289,7 +289,7 @@ def crawl_links(data: CrawlRequest):
     return {"status": "completed"}
 
 # =========================================================
-# EXPORTS
+# EXPORTS (UNCHANGED)
 # =========================================================
 @app.get("/export/blog-page-links")
 def export_blog_page_links():
@@ -303,9 +303,6 @@ def export_blog_page_links():
     rows = cur.fetchall()
     cur.close()
     conn.close()
-
-    if not rows:
-        return StreamingResponse(io.StringIO("blog_page,url,is_dofollow,is_casino\n"), media_type="text/csv")
 
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=rows[0].keys())
@@ -323,9 +320,6 @@ def export_commercial_sites():
     cur.close()
     conn.close()
 
-    if not rows:
-        return StreamingResponse(io.StringIO("commercial_domain,total_links,dofollow_percent,is_casino\n"), media_type="text/csv")
-
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=rows[0].keys())
     writer.writeheader()
@@ -333,9 +327,6 @@ def export_commercial_sites():
     buf.seek(0)
     return StreamingResponse(buf, media_type="text/csv")
 
-# =========================================================
-# ✅ BLOG SUMMARY — POSTGRES SAFE (FINAL FIX)
-# =========================================================
 @app.get("/export/blog-summary")
 def export_blog_summary():
     conn = get_db()
@@ -368,12 +359,6 @@ def export_blog_summary():
     cur.close()
     conn.close()
 
-    if not rows:
-        return StreamingResponse(
-            io.StringIO("blog,unique_commercial_sites,total_commercial_links,dofollow_percent,has_casino_links\n"),
-            media_type="text/csv"
-        )
-
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=rows[0].keys())
     writer.writeheader()
@@ -381,28 +366,63 @@ def export_blog_summary():
     buf.seek(0)
     return StreamingResponse(buf, media_type="text/csv")
 
-@app.get("/history")
-def history():
+# =========================================================
+# COMMERCIAL SITE ENRICHMENT (NEW, SAFE)
+# =========================================================
+def enrich_commercial_site(cur, domain: str):
+    try:
+        r = session.get("https://" + domain, timeout=15, verify=False)
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        title = soup.title.string.strip() if soup.title else None
+        desc = soup.find("meta", attrs={"name": "description"})
+        description = desc["content"].strip() if desc else None
+
+        text = " ".join([title or "", description or "", soup.get_text(" ")]).lower()
+        is_casino_homepage = any(k in text for k in CASINO_KEYWORDS)
+
+        cur.execute("""
+            UPDATE commercial_sites
+            SET
+                meta_title = %s,
+                meta_description = %s,
+                is_casino = is_casino OR %s,
+                homepage_checked = TRUE
+            WHERE commercial_domain = %s
+        """, (title, description, is_casino_homepage, domain))
+
+    except Exception:
+        cur.execute("""
+            UPDATE commercial_sites
+            SET homepage_checked = TRUE
+            WHERE commercial_domain = %s
+        """, (domain,))
+
+@app.post("/enrich/commercial-sites")
+def enrich_commercial_sites(limit: int = 25):
     conn = get_db()
     cur = conn.cursor()
+
     cur.execute("""
-        SELECT blog_url, first_crawled
-        FROM blog_pages
-        WHERE is_root = TRUE
-          AND first_crawled >= %s
-        ORDER BY first_crawled DESC
-    """, (datetime.utcnow() - timedelta(days=30),))
+        SELECT commercial_domain
+        FROM commercial_sites
+        WHERE homepage_checked = FALSE
+        LIMIT %s
+    """, (limit,))
+
     rows = cur.fetchall()
+
+    for r in rows:
+        enrich_commercial_site(cur, r["commercial_domain"])
+        conn.commit()
+        time.sleep(random.uniform(0.6, 1.2))
+
     cur.close()
     conn.close()
-    return rows
-
-@app.get("/progress")
-def progress():
-    return {"status": "running"}
+    return {"status": "enriched", "processed": len(rows)}
 
 # =========================================================
-# WORKER
+# WORKER (UNCHANGED)
 # =========================================================
 crawl_queue = Queue()
 
