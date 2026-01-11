@@ -101,10 +101,10 @@ def is_within_last_12_months(lastmod: str) -> bool:
         dt = datetime.fromisoformat(lastmod.replace("Z", ""))
         return dt >= datetime.utcnow() - timedelta(days=365)
     except Exception:
-        return True  # KEEP page if date is invalid
+        return True
 
 # =========================================================
-# PAGE DISCOVERY (SAFE DATE FILTER ADDED)
+# PAGE DISCOVERY
 # =========================================================
 def discover_blog_pages(blog_url: str, cur):
     discovered = set()
@@ -180,7 +180,7 @@ def discover_blog_pages(blog_url: str, cur):
     return len(discovered)
 
 # =========================================================
-# LINK EXTRACTION (UNCHANGED)
+# LINK EXTRACTION
 # =========================================================
 def extract_outbound_links(page_url: str):
     try:
@@ -242,7 +242,7 @@ class CrawlRequest(BaseModel):
     blog_url: str
 
 # =========================================================
-# ROUTES (UNCHANGED)
+# ROUTES
 # =========================================================
 @app.get("/")
 def health():
@@ -414,7 +414,7 @@ def export_blog_summary():
     return StreamingResponse(buf, media_type="text/csv")
 
 # =========================================================
-# COMMERCIAL SITE ENRICHMENT (UNCHANGED)
+# COMMERCIAL SITE ENRICHMENT
 # =========================================================
 def enrich_commercial_site(cur, domain: str):
     try:
@@ -469,7 +469,7 @@ def enrich_commercial_sites(limit: int = 25):
     return {"status": "enriched", "processed": len(rows)}
 
 # =========================================================
-# WORKER (UNCHANGED)
+# WORKER
 # =========================================================
 crawl_queue = Queue()
 
