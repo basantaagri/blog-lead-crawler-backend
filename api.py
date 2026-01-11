@@ -35,7 +35,7 @@ session.headers.update(HEADERS)
 # =========================================================
 # APP
 # =========================================================
-app = FastAPI(title="Blog Lead Crawler API", version="1.3.4")
+app = FastAPI(title="Blog Lead Crawler API", version="1.3.5")
 
 app.add_middleware(
     CORSMiddleware,
@@ -96,8 +96,15 @@ def extract_domain(url: str) -> str:
 def is_casino_link(url: str) -> bool:
     return any(k in url.lower() for k in CASINO_KEYWORDS)
 
+def is_within_last_12_months(lastmod: str) -> bool:
+    try:
+        dt = datetime.fromisoformat(lastmod.replace("Z", ""))
+        return dt >= datetime.utcnow() - timedelta(days=365)
+    except Exception:
+        return True  # KEEP page if date is invalid
+
 # =========================================================
-# PAGE DISCOVERY (UNCHANGED)
+# PAGE DISCOVERY (SAFE DATE FILTER ADDED)
 # =========================================================
 def discover_blog_pages(blog_url: str, cur):
     discovered = set()
@@ -124,12 +131,24 @@ def discover_blog_pages(blog_url: str, cur):
                 if loc:
                     crawl_sitemap(loc.text.strip())
 
-            for loc in soup.find_all("loc"):
+            for url_tag in soup.find_all("url"):
                 if len(discovered) >= MAX_PAGES_PER_BLOG:
                     break
+
+                loc = url_tag.find("loc")
+                lastmod = url_tag.find("lastmod")
+                if not loc:
+                    continue
+
                 page = loc.text.strip()
-                if page.startswith(blog_url):
-                    discovered.add(page)
+                if not page.startswith(blog_url):
+                    continue
+
+                if lastmod and not is_within_last_12_months(lastmod.text.strip()):
+                    continue
+
+                discovered.add(page)
+
         except Exception:
             return
 
@@ -289,7 +308,7 @@ def crawl_links(data: CrawlRequest):
     return {"status": "completed"}
 
 # =========================================================
-# EXPORTS (UNCHANGED)
+# EXPORTS
 # =========================================================
 @app.get("/export/blog-page-links")
 def export_blog_page_links():
@@ -315,7 +334,35 @@ def export_blog_page_links():
 def export_commercial_sites():
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM commercial_sites")
+
+    cur.execute("""
+        SELECT
+            cs.commercial_domain,
+            COUNT(ol.id) AS total_links,
+            ROUND(
+                100.0 * SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END)
+                / NULLIF(COUNT(ol.id), 0), 2
+            ) AS dofollow_percent,
+            BOOL_OR(ol.is_casino) AS is_casino,
+            cs.meta_title,
+            cs.meta_description,
+            cs.homepage_checked,
+            COUNT(DISTINCT root.blog_url) AS blogs_linking_count
+        FROM commercial_sites cs
+        JOIN outbound_links ol
+          ON ol.url ILIKE '%' || cs.commercial_domain || '%'
+        JOIN blog_pages bp ON bp.id = ol.blog_page_id
+        JOIN blog_pages root
+          ON root.is_root = TRUE
+         AND bp.blog_url ILIKE '%' || replace(replace(root.blog_url,'https://',''),'http://','') || '%'
+        GROUP BY
+            cs.commercial_domain,
+            cs.meta_title,
+            cs.meta_description,
+            cs.homepage_checked
+        ORDER BY total_links DESC
+    """)
+
     rows = cur.fetchall()
     cur.close()
     conn.close()
@@ -367,7 +414,7 @@ def export_blog_summary():
     return StreamingResponse(buf, media_type="text/csv")
 
 # =========================================================
-# COMMERCIAL SITE ENRICHMENT (NEW, SAFE)
+# COMMERCIAL SITE ENRICHMENT (UNCHANGED)
 # =========================================================
 def enrich_commercial_site(cur, domain: str):
     try:
