@@ -54,7 +54,7 @@ def health():
     return {"status": "ok"}
 
 # =========================================================
-# CRAWL BLOG (ROOT + POSTS)
+# CRAWL BLOG (ROOT ONLY)
 # =========================================================
 @app.post("/crawl")
 def crawl_blog(req: CrawlRequest):
@@ -76,11 +76,11 @@ def crawl_blog(req: CrawlRequest):
     return {"status": "blog stored"}
 
 # =========================================================
-# CRAWL LINKS (POSTS → OUTBOUND LINKS)
+# CRAWL LINKS (WORKER TRIGGER ONLY)
 # =========================================================
 @app.post("/crawl-links")
 def crawl_links(req: CrawlRequest):
-    # Logic already exists in your crawler worker
+    # Worker handles crawling + extraction
     return {"status": "link crawling started"}
 
 # =========================================================
