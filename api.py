@@ -118,7 +118,7 @@ def export_blog_page_links():
     return StreamingResponse(buf, media_type="text/csv")
 
 # =========================================================
-# EXPORT — COMMERCIAL SITES
+# EXPORT — COMMERCIAL SITES (ONLY FIX APPLIED HERE)
 # =========================================================
 @app.get("/export/commercial-sites")
 def export_commercial_sites():
@@ -145,6 +145,21 @@ def export_commercial_sites():
         JOIN blog_pages root
           ON root.is_root = TRUE
          AND bp.blog_url ILIKE '%' || replace(replace(root.blog_url,'https://',''),'http://','') || '%'
+        WHERE
+            cs.commercial_domain NOT ILIKE '%facebook%'
+        AND cs.commercial_domain NOT ILIKE '%instagram%'
+        AND cs.commercial_domain NOT ILIKE '%twitter%'
+        AND cs.commercial_domain NOT ILIKE '%t.co%'
+        AND cs.commercial_domain NOT ILIKE '%youtube%'
+        AND cs.commercial_domain NOT ILIKE '%youtu%'
+        AND cs.commercial_domain NOT ILIKE '%pinterest%'
+        AND cs.commercial_domain NOT ILIKE '%reddit%'
+        AND cs.commercial_domain NOT ILIKE '%linkedin%'
+        AND cs.commercial_domain NOT ILIKE '%whatsapp%'
+        AND cs.commercial_domain NOT ILIKE '%bsky%'
+        AND cs.commercial_domain NOT ILIKE '%spotify%'
+        AND cs.commercial_domain NOT ILIKE '%google%'
+        AND cs.commercial_domain NOT ILIKE '%apple%'
         GROUP BY
             cs.commercial_domain,
             cs.meta_title,
