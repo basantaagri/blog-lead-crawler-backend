@@ -15,7 +15,7 @@ print("### BLOG LEAD CRAWLER — BASELINE SAFE VERSION RUNNING ###")
 # =========================================================
 # APP INIT
 # =========================================================
-app = FastAPI(title="Blog Lead Crawler API", version="1.3.6")
+app = FastAPI(title="Blog Lead Crawler API", version="1.3.5")
 
 app.add_middleware(
     CORSMiddleware,
@@ -40,9 +40,26 @@ def get_db():
     )
 
 # =========================================================
-# 🔒 CASINO DETECTION — STRICT & SAFE (NEW, NO SIDE EFFECTS)
+# MODELS
+# =========================================================
+class CrawlRequest(BaseModel):
+    blog_url: str
+
+# =========================================================
+# ✅ CASINO DETECTION LOGIC (ADDED — NOT WIRED YET)
 # =========================================================
 def is_casino_site(title: str, description: str, anchors: list[str]) -> bool:
+    casino_keywords = [
+        "casino", "betting", "sportsbook", "slots", "poker",
+        "roulette", "blackjack", "gambling", "bet now", "play now"
+    ]
+
+    negative_keywords = [
+        "software", "platform", "marketing", "crm", "analytics",
+        "time tracking", "design tool", "research", "consulting",
+        "saas", "productivity", "cloud", "enterprise"
+    ]
+
     haystacks = []
 
     if title:
@@ -54,28 +71,14 @@ def is_casino_site(title: str, description: str, anchors: list[str]) -> bool:
     for a in anchors or []:
         haystacks.append(a.lower())
 
-    CASINO_KEYWORDS_STRICT = [
-        "online casino",
-        "casino",
-        "betting",
-        "sportsbook",
-        "slots",
-        "roulette",
-        "blackjack",
-        "poker"
-    ]
+    text = " ".join(haystacks)
 
-    return any(
-        kw in text
-        for text in haystacks
-        for kw in CASINO_KEYWORDS_STRICT
-    )
+    # Hard negative filter (prevents SaaS false positives)
+    if any(neg in text for neg in negative_keywords):
+        return False
 
-# =========================================================
-# MODELS
-# =========================================================
-class CrawlRequest(BaseModel):
-    blog_url: str
+    # Positive casino signal
+    return any(pos in text for pos in casino_keywords)
 
 # =========================================================
 # HEALTH
@@ -86,7 +89,7 @@ def health():
     return {"status": "ok"}
 
 # =========================================================
-# CRAWL BLOG (ROOT ONLY — EXISTING)
+# CRAWL BLOG (ROOT + POSTS)
 # =========================================================
 @app.post("/crawl")
 def crawl_blog(req: CrawlRequest):
@@ -108,10 +111,11 @@ def crawl_blog(req: CrawlRequest):
     return {"status": "blog stored"}
 
 # =========================================================
-# CRAWL LINKS (WORKER HANDLED — UNTOUCHED)
+# CRAWL LINKS (POSTS → OUTBOUND LINKS)
 # =========================================================
 @app.post("/crawl-links")
 def crawl_links(req: CrawlRequest):
+    # Logic already exists in your crawler worker
     return {"status": "link crawling started"}
 
 # =========================================================
@@ -149,7 +153,7 @@ def export_blog_page_links():
     return StreamingResponse(buf, media_type="text/csv")
 
 # =========================================================
-# EXPORT — COMMERCIAL SITES (UNCHANGED)
+# EXPORT — COMMERCIAL SITES
 # =========================================================
 @app.get("/export/commercial-sites")
 def export_commercial_sites():
@@ -200,7 +204,7 @@ def export_commercial_sites():
     return StreamingResponse(buf, media_type="text/csv")
 
 # =========================================================
-# EXPORT — BLOG SUMMARY (UNCHANGED)
+# EXPORT — BLOG SUMMARY
 # =========================================================
 @app.get("/export/blog-summary")
 def export_blog_summary():
