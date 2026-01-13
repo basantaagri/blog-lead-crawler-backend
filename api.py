@@ -12,12 +12,12 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 from urllib.parse import urlparse
 
-print("### BLOG LEAD CRAWLER — SAFE SITEMAP INDEX VERSION RUNNING ###")
+print("### BLOG LEAD CRAWLER — SAFE WP REST FALLBACK VERSION RUNNING ###")
 
 # =========================================================
 # APP INIT
 # =========================================================
-app = FastAPI(title="Blog Lead Crawler API", version="1.3.7")
+app = FastAPI(title="Blog Lead Crawler API", version="1.3.8")
 
 app.add_middleware(
     CORSMiddleware,
@@ -56,7 +56,7 @@ def health():
     return {"status": "ok"}
 
 # =========================================================
-# FIX 1 — SITEMAP INDEX + POST DISCOVERY (SAFE)
+# SITEMAP PARSER
 # =========================================================
 def parse_sitemap(url: str, collected: set):
     try:
@@ -66,12 +66,10 @@ def parse_sitemap(url: str, collected: set):
 
         soup = BeautifulSoup(r.text, "xml")
 
-        # Sitemap index → recurse
         if soup.find("sitemapindex"):
             for loc in soup.find_all("loc"):
                 parse_sitemap(loc.text.strip(), collected)
 
-        # URL set → collect posts
         if soup.find("urlset"):
             for loc in soup.find_all("loc"):
                 link = loc.text.strip()
@@ -81,7 +79,25 @@ def parse_sitemap(url: str, collected: set):
     except:
         pass
 
+# =========================================================
+# WP REST API FALLBACK (CRITICAL FIX)
+# =========================================================
+def discover_posts_via_wp_api(blog_url: str):
+    posts = set()
+    try:
+        api = f"{blog_url}/wp-json/wp/v2/posts?per_page=100"
+        r = requests.get(api, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code == 200:
+            for post in r.json():
+                if "link" in post:
+                    posts.add(post["link"].rstrip("/"))
+    except:
+        pass
+    return posts
 
+# =========================================================
+# BLOG POST DISCOVERY (SAFE)
+# =========================================================
 def discover_blog_posts(blog_url: str):
     discovered = set()
 
@@ -93,17 +109,19 @@ def discover_blog_posts(blog_url: str):
     for sm in sitemap_urls:
         parse_sitemap(sm, discovered)
 
+    # 🔥 FALLBACK — WordPress REST API
+    if not discovered:
+        discovered |= discover_posts_via_wp_api(blog_url)
+
     return list(discovered)[:1000]
 
 # =========================================================
-# FIX 2 — OUTBOUND LINK EXTRACTION (UNCHANGED)
+# OUTBOUND LINK EXTRACTION
 # =========================================================
 def extract_outbound_links(page_url: str):
     links = []
-    headers = {"User-Agent": "Mozilla/5.0"}
-
     try:
-        r = requests.get(page_url, timeout=10, headers=headers)
+        r = requests.get(page_url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
         soup = BeautifulSoup(r.text, "html.parser")
         base_domain = urlparse(page_url).netloc
 
@@ -111,7 +129,6 @@ def extract_outbound_links(page_url: str):
             href = a["href"].strip()
             if href.startswith("http") and base_domain not in href:
                 links.append(href)
-
     except:
         pass
 
@@ -127,14 +144,12 @@ def crawl_blog(req: CrawlRequest):
 
     blog_url = req.blog_url.rstrip("/")
 
-    # Store root
     cur.execute("""
         INSERT INTO blog_pages (blog_url, is_root)
         VALUES (%s, TRUE)
         ON CONFLICT (blog_url) DO NOTHING
     """, (blog_url,))
 
-    # Discover blog posts via sitemap index
     posts = discover_blog_posts(blog_url)
     for url in posts:
         cur.execute("""
@@ -153,7 +168,7 @@ def crawl_blog(req: CrawlRequest):
     }
 
 # =========================================================
-# CRAWL LINKS (ACTUAL EXTRACTION)
+# CRAWL LINKS
 # =========================================================
 @app.post("/crawl-links")
 def crawl_links(req: CrawlRequest):
@@ -193,24 +208,18 @@ def crawl_links(req: CrawlRequest):
     }
 
 # =========================================================
-# EXPORT — BLOG → PAGE → LINKS
+# EXPORTS (UNCHANGED)
 # =========================================================
 @app.get("/export/blog-page-links")
 def export_blog_page_links():
     conn = get_db()
     cur = conn.cursor()
-
     cur.execute("""
-        SELECT
-            bp.blog_url,
-            ol.url AS commercial_url,
-            ol.is_dofollow,
-            ol.is_casino
+        SELECT bp.blog_url, ol.url AS commercial_url, ol.is_dofollow, ol.is_casino
         FROM outbound_links ol
         JOIN blog_pages bp ON bp.id = ol.blog_page_id
         ORDER BY bp.blog_url
     """)
-
     rows = cur.fetchall()
     cur.close()
     conn.close()
@@ -223,45 +232,27 @@ def export_blog_page_links():
     writer.writeheader()
     writer.writerows(rows)
     buf.seek(0)
-
     return StreamingResponse(buf, media_type="text/csv")
 
-# =========================================================
-# EXPORT — COMMERCIAL SITES
-# =========================================================
 @app.get("/export/commercial-sites")
 def export_commercial_sites():
     conn = get_db()
     cur = conn.cursor()
-
     cur.execute("""
-        SELECT
-            cs.commercial_domain,
-            COUNT(ol.id) AS total_links,
-            ROUND(
-                100.0 * SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END)
-                / NULLIF(COUNT(ol.id), 0), 2
-            ) AS dofollow_percent,
-            BOOL_OR(ol.is_casino) AS is_casino,
-            cs.meta_title,
-            cs.meta_description,
-            cs.homepage_checked,
-            COUNT(DISTINCT root.blog_url) AS blogs_linking_count
+        SELECT cs.commercial_domain,
+               COUNT(ol.id) AS total_links,
+               ROUND(100.0 * SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END) / NULLIF(COUNT(ol.id),0),2) AS dofollow_percent,
+               BOOL_OR(ol.is_casino) AS is_casino,
+               cs.meta_title, cs.meta_description, cs.homepage_checked,
+               COUNT(DISTINCT root.blog_url) AS blogs_linking_count
         FROM commercial_sites cs
-        JOIN outbound_links ol
-          ON ol.url ILIKE '%' || cs.commercial_domain || '%'
+        JOIN outbound_links ol ON ol.url ILIKE '%' || cs.commercial_domain || '%'
         JOIN blog_pages bp ON bp.id = ol.blog_page_id
-        JOIN blog_pages root
-          ON root.is_root = TRUE
+        JOIN blog_pages root ON root.is_root = TRUE
          AND bp.blog_url ILIKE '%' || replace(replace(root.blog_url,'https://',''),'http://','') || '%'
-        GROUP BY
-            cs.commercial_domain,
-            cs.meta_title,
-            cs.meta_description,
-            cs.homepage_checked
+        GROUP BY cs.commercial_domain, cs.meta_title, cs.meta_description, cs.homepage_checked
         ORDER BY total_links DESC
     """)
-
     rows = cur.fetchall()
     cur.close()
     conn.close()
@@ -274,36 +265,25 @@ def export_commercial_sites():
     writer.writeheader()
     writer.writerows(rows)
     buf.seek(0)
-
     return StreamingResponse(buf, media_type="text/csv")
 
-# =========================================================
-# EXPORT — BLOG SUMMARY
-# =========================================================
 @app.get("/export/blog-summary")
 def export_blog_summary():
     conn = get_db()
     cur = conn.cursor()
-
     cur.execute("""
-        SELECT
-            root.blog_url,
-            COUNT(DISTINCT cs.commercial_domain) AS unique_commercial_sites,
-            ROUND(
-                100.0 * SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END)
-                / NULLIF(COUNT(ol.id), 0), 2
-            ) AS dofollow_percent,
-            BOOL_OR(ol.is_casino) AS casino_present
+        SELECT root.blog_url,
+               COUNT(DISTINCT cs.commercial_domain) AS unique_commercial_sites,
+               ROUND(100.0 * SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END) / NULLIF(COUNT(ol.id),0),2) AS dofollow_percent,
+               BOOL_OR(ol.is_casino) AS casino_present
         FROM blog_pages root
-        JOIN blog_pages bp
-          ON bp.blog_url ILIKE '%' || replace(replace(root.blog_url,'https://',''),'http://','') || '%'
+        JOIN blog_pages bp ON bp.blog_url ILIKE '%' || replace(replace(root.blog_url,'https://',''),'http://','') || '%'
         JOIN outbound_links ol ON ol.blog_page_id = bp.id
         JOIN commercial_sites cs ON ol.url ILIKE '%' || cs.commercial_domain || '%'
         WHERE root.is_root = TRUE
         GROUP BY root.blog_url
         ORDER BY root.blog_url
     """)
-
     rows = cur.fetchall()
     cur.close()
     conn.close()
@@ -316,33 +296,23 @@ def export_blog_summary():
     writer.writeheader()
     writer.writerows(rows)
     buf.seek(0)
-
     return StreamingResponse(buf, media_type="text/csv")
 
-# =========================================================
-# HISTORY
-# =========================================================
 @app.get("/history")
 def history():
     conn = get_db()
     cur = conn.cursor()
-
     cur.execute("""
         SELECT blog_url, first_crawled, is_root
         FROM blog_pages
         ORDER BY first_crawled DESC
         LIMIT 50
     """)
-
     rows = cur.fetchall()
     cur.close()
     conn.close()
-
     return rows
 
-# =========================================================
-# PROGRESS
-# =========================================================
 @app.get("/progress")
 def progress():
     return {
