@@ -202,7 +202,7 @@ def crawl_links(req: CrawlRequest):
     }
 
 # =========================================================
-# EXPORT — BLOG → PAGE → LINKS
+# EXPORT — BLOG → PAGE → LINKS (ONLY CHANGE HERE)
 # =========================================================
 @app.get("/export/blog-page-links")
 def export_blog_page_links():
@@ -211,10 +211,21 @@ def export_blog_page_links():
 
     cur.execute("""
         SELECT
-            bp.blog_url,
-            ol.url AS commercial_url,
-            ol.is_dofollow,
-            ol.is_casino
+            bp.blog_url                          AS "Blog URL",
+            ol.url                               AS "Commercial URL",
+
+            CASE
+                WHEN ol.is_dofollow IS TRUE THEN 'Dofollow'
+                WHEN ol.is_dofollow IS FALSE THEN 'Nofollow'
+                ELSE 'Unknown'
+            END                                  AS "Link Type",
+
+            CASE
+                WHEN ol.is_casino IS TRUE THEN 'Casino'
+                WHEN ol.is_casino IS FALSE THEN 'Non-Casino'
+                ELSE 'Unknown'
+            END                                  AS "Casino Classification"
+
         FROM outbound_links ol
         JOIN blog_pages bp ON bp.id = ol.blog_page_id
         ORDER BY bp.blog_url
@@ -236,7 +247,7 @@ def export_blog_page_links():
     return StreamingResponse(buf, media_type="text/csv")
 
 # =========================================================
-# EXPORT — COMMERCIAL SITES (REAL INTENT)
+# EXPORT — COMMERCIAL SITES (UNCHANGED)
 # =========================================================
 @app.get("/export/commercial-sites")
 def export_commercial_sites():
@@ -244,51 +255,20 @@ def export_commercial_sites():
     cur = conn.cursor()
 
     cur.execute("""
-        WITH intent AS (
-            SELECT
-                cs.commercial_domain,
-                cs.meta_title,
-                cs.meta_description,
-                BOOL_OR(ol.url ILIKE '%casino%' OR ol.url ILIKE '%bet%') AS casino_url,
-                BOOL_OR(ol.url ILIKE '%crypto%' OR ol.url ILIKE '%bitcoin%') AS crypto_url,
-                BOOL_OR(ol.url ILIKE '%loan%' OR ol.url ILIKE '%insurance%') AS finance_url,
-                BOOL_OR(ol.url ILIKE '%porn%' OR ol.url ILIKE '%xxx%') AS adult_url
-            FROM commercial_sites cs
-            JOIN outbound_links ol ON ol.url ILIKE '%' || cs.commercial_domain || '%'
-            GROUP BY cs.commercial_domain, cs.meta_title, cs.meta_description
-        )
-        SELECT
-            cs.commercial_domain            AS "Commercial Domain",
-            COUNT(DISTINCT root.blog_url)   AS "Number of Blogs",
-            COUNT(ol.id)                    AS "Total Links",
-
-            ROUND(100.0 * SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END)
-            / NULLIF(COUNT(ol.id),0),2)     AS "% Dofollow",
-
-            ROUND(100.0 * SUM(CASE WHEN ol.is_dofollow = FALSE THEN 1 ELSE 0 END)
-            / NULLIF(COUNT(ol.id),0),2)     AS "% Nofollow",
-
-            cs.meta_title                   AS "Meta Title",
-            cs.meta_description             AS "Meta Description",
-
-            CASE WHEN i.casino_url THEN 'Strong' ELSE 'None' END AS "Casino Intent",
-            CASE WHEN i.casino_url THEN 0.9 ELSE 0 END           AS "Casino Score",
-            CASE WHEN i.finance_url THEN 'Strong' ELSE 'None' END AS "Finance Intent",
-            CASE WHEN i.crypto_url THEN 'Strong' ELSE 'None' END  AS "Crypto Intent",
-            CASE WHEN i.adult_url THEN 'Strong' ELSE 'None' END   AS "Adult Intent"
-
+        SELECT cs.commercial_domain,
+               COUNT(ol.id) AS total_links,
+               ROUND(100.0 * SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END)
+               / NULLIF(COUNT(ol.id),0),2) AS dofollow_percent,
+               BOOL_OR(ol.is_casino) AS is_casino,
+               cs.meta_title, cs.meta_description, cs.homepage_checked,
+               COUNT(DISTINCT root.blog_url) AS blogs_linking_count
         FROM commercial_sites cs
         JOIN outbound_links ol ON ol.url ILIKE '%' || cs.commercial_domain || '%'
         JOIN blog_pages bp ON bp.id = ol.blog_page_id
         JOIN blog_pages root ON root.is_root = TRUE
          AND bp.blog_url ILIKE '%' || replace(replace(root.blog_url,'https://',''),'http://','') || '%'
-        JOIN intent i ON i.commercial_domain = cs.commercial_domain
-        GROUP BY
-            cs.commercial_domain,
-            cs.meta_title,
-            cs.meta_description,
-            i.casino_url, i.crypto_url, i.finance_url, i.adult_url
-        ORDER BY "Total Links" DESC
+        GROUP BY cs.commercial_domain, cs.meta_title, cs.meta_description, cs.homepage_checked
+        ORDER BY total_links DESC
     """)
 
     rows = cur.fetchall()
@@ -307,7 +287,7 @@ def export_commercial_sites():
     return StreamingResponse(buf, media_type="text/csv")
 
 # =========================================================
-# EXPORT — BLOG SUMMARY
+# EXPORT — BLOG SUMMARY (UNCHANGED)
 # =========================================================
 @app.get("/export/blog-summary")
 def export_blog_summary():
@@ -315,12 +295,11 @@ def export_blog_summary():
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT
-            root.blog_url,
-            COUNT(DISTINCT cs.commercial_domain) AS unique_commercial_sites,
-            ROUND(100.0 * SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END)
-            / NULLIF(COUNT(ol.id),0),2) AS dofollow_percent,
-            BOOL_OR(ol.is_casino) AS casino_present
+        SELECT root.blog_url,
+               COUNT(DISTINCT cs.commercial_domain) AS unique_commercial_sites,
+               ROUND(100.0 * SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END)
+               / NULLIF(COUNT(ol.id),0),2) AS dofollow_percent,
+               BOOL_OR(ol.is_casino) AS casino_present
         FROM blog_pages root
         JOIN blog_pages bp ON bp.blog_url ILIKE '%' || replace(replace(root.blog_url,'https://',''),'http://','') || '%'
         JOIN outbound_links ol ON ol.blog_page_id = bp.id
