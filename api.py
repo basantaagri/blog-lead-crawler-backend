@@ -12,12 +12,12 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 from urllib.parse import urlparse
 
-print("### BLOG LEAD CRAWLER — SAFE DISCOVERY + EXTRACTION VERSION RUNNING ###")
+print("### BLOG LEAD CRAWLER — SAFE SITEMAP INDEX VERSION RUNNING ###")
 
 # =========================================================
 # APP INIT
 # =========================================================
-app = FastAPI(title="Blog Lead Crawler API", version="1.3.6")
+app = FastAPI(title="Blog Lead Crawler API", version="1.3.7")
 
 app.add_middleware(
     CORSMiddleware,
@@ -56,33 +56,47 @@ def health():
     return {"status": "ok"}
 
 # =========================================================
-# FIX 1 — BLOG POST DISCOVERY (SAFE)
+# FIX 1 — SITEMAP INDEX + POST DISCOVERY (SAFE)
 # =========================================================
+def parse_sitemap(url: str, collected: set):
+    try:
+        r = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code != 200:
+            return
+
+        soup = BeautifulSoup(r.text, "xml")
+
+        # Sitemap index → recurse
+        if soup.find("sitemapindex"):
+            for loc in soup.find_all("loc"):
+                parse_sitemap(loc.text.strip(), collected)
+
+        # URL set → collect posts
+        if soup.find("urlset"):
+            for loc in soup.find_all("loc"):
+                link = loc.text.strip()
+                if any(x in link for x in ["/blog/", "/post/", "/202", "/article"]):
+                    collected.add(link.rstrip("/"))
+
+    except:
+        pass
+
+
 def discover_blog_posts(blog_url: str):
     discovered = set()
-    headers = {"User-Agent": "Mozilla/5.0"}
 
     sitemap_urls = [
-        f"{blog_url}/sitemap.xml",
-        f"{blog_url}/post-sitemap.xml"
+        f"{blog_url}/wp-sitemap.xml",
+        f"{blog_url}/sitemap.xml"
     ]
 
     for sm in sitemap_urls:
-        try:
-            r = requests.get(sm, timeout=10, headers=headers)
-            if r.status_code == 200:
-                soup = BeautifulSoup(r.text, "xml")
-                for loc in soup.find_all("loc"):
-                    url = loc.text.strip()
-                    if any(x in url for x in ["/blog/", "/202", "/post/"]):
-                        discovered.add(url.rstrip("/"))
-        except:
-            pass
+        parse_sitemap(sm, discovered)
 
     return list(discovered)[:1000]
 
 # =========================================================
-# FIX 2 — OUTBOUND LINK EXTRACTION
+# FIX 2 — OUTBOUND LINK EXTRACTION (UNCHANGED)
 # =========================================================
 def extract_outbound_links(page_url: str):
     links = []
@@ -95,9 +109,9 @@ def extract_outbound_links(page_url: str):
 
         for a in soup.find_all("a", href=True):
             href = a["href"].strip()
-            if href.startswith("http"):
-                if base_domain not in href:
-                    links.append(href)
+            if href.startswith("http") and base_domain not in href:
+                links.append(href)
+
     except:
         pass
 
@@ -120,7 +134,7 @@ def crawl_blog(req: CrawlRequest):
         ON CONFLICT (blog_url) DO NOTHING
     """, (blog_url,))
 
-    # Discover and store blog posts
+    # Discover blog posts via sitemap index
     posts = discover_blog_posts(blog_url)
     for url in posts:
         cur.execute("""
