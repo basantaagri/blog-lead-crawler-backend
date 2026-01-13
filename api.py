@@ -75,7 +75,6 @@ def parse_sitemap(url: str, collected: set):
                 link = loc.text.strip()
                 if any(x in link for x in ["/blog/", "/post/", "/202", "/article"]):
                     collected.add(link.rstrip("/"))
-
     except:
         pass
 
@@ -125,7 +124,6 @@ def extract_outbound_links(page_url: str):
                 links.append(href)
     except:
         pass
-
     return links
 
 # =========================================================
@@ -202,7 +200,7 @@ def crawl_links(req: CrawlRequest):
     }
 
 # =========================================================
-# EXPORT — BLOG → PAGE → LINKS (ONLY CHANGE HERE)
+# EXPORT — BLOG → PAGE → LINKS
 # =========================================================
 @app.get("/export/blog-page-links")
 def export_blog_page_links():
@@ -211,21 +209,10 @@ def export_blog_page_links():
 
     cur.execute("""
         SELECT
-            bp.blog_url                          AS "Blog URL",
-            ol.url                               AS "Commercial URL",
-
-            CASE
-                WHEN ol.is_dofollow IS TRUE THEN 'Dofollow'
-                WHEN ol.is_dofollow IS FALSE THEN 'Nofollow'
-                ELSE 'Unknown'
-            END                                  AS "Link Type",
-
-            CASE
-                WHEN ol.is_casino IS TRUE THEN 'Casino'
-                WHEN ol.is_casino IS FALSE THEN 'Non-Casino'
-                ELSE 'Unknown'
-            END                                  AS "Casino Classification"
-
+            bp.blog_url AS "Blog URL",
+            ol.url AS "Commercial URL",
+            CASE WHEN ol.is_dofollow THEN 'Dofollow' ELSE 'Nofollow' END AS "Link Type",
+            CASE WHEN ol.is_casino THEN 'Casino' ELSE 'Non-Casino' END AS "Casino Classification"
         FROM outbound_links ol
         JOIN blog_pages bp ON bp.id = ol.blog_page_id
         ORDER BY bp.blog_url
@@ -243,11 +230,10 @@ def export_blog_page_links():
     writer.writeheader()
     writer.writerows(rows)
     buf.seek(0)
-
     return StreamingResponse(buf, media_type="text/csv")
 
 # =========================================================
-# EXPORT — COMMERCIAL SITES (UNCHANGED)
+# EXPORT — COMMERCIAL SITES (UPDATED WITH FINAL SQL)
 # =========================================================
 @app.get("/export/commercial-sites")
 def export_commercial_sites():
@@ -255,19 +241,45 @@ def export_commercial_sites():
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT cs.commercial_domain,
-               COUNT(ol.id) AS total_links,
-               ROUND(100.0 * SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END)
-               / NULLIF(COUNT(ol.id),0),2) AS dofollow_percent,
-               BOOL_OR(ol.is_casino) AS is_casino,
-               cs.meta_title, cs.meta_description, cs.homepage_checked,
-               COUNT(DISTINCT root.blog_url) AS blogs_linking_count
+        SELECT
+          cs.commercial_domain,
+
+          COUNT(ol.id) AS total_links,
+          COUNT(DISTINCT root.blog_url) AS unique_blogs,
+          COUNT(DISTINCT bp.id) AS unique_blog_pages,
+
+          COUNT(*) FILTER (WHERE ol.is_casino = TRUE) AS casino_links_count,
+
+          ROUND(
+            100.0 * COUNT(*) FILTER (WHERE ol.is_casino = TRUE)
+            / NULLIF(COUNT(ol.id), 0),
+          2) AS casino_links_percent,
+
+          ROUND(
+            100.0 * SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END)
+            / NULLIF(COUNT(ol.id), 0),
+          2) AS dofollow_percent,
+
+          cs.meta_title AS root_domain_title,
+          cs.meta_description AS root_domain_meta_description,
+          cs.homepage_checked AS homepage_checked_at
+
         FROM commercial_sites cs
-        JOIN outbound_links ol ON ol.url ILIKE '%' || cs.commercial_domain || '%'
-        JOIN blog_pages bp ON bp.id = ol.blog_page_id
-        JOIN blog_pages root ON root.is_root = TRUE
-         AND bp.blog_url ILIKE '%' || replace(replace(root.blog_url,'https://',''),'http://','') || '%'
-        GROUP BY cs.commercial_domain, cs.meta_title, cs.meta_description, cs.homepage_checked
+        JOIN outbound_links ol
+          ON ol.url ILIKE '%' || cs.commercial_domain || '%'
+        JOIN blog_pages bp
+          ON bp.id = ol.blog_page_id
+        JOIN blog_pages root
+          ON root.is_root = TRUE
+         AND bp.blog_url ILIKE '%' ||
+             replace(replace(root.blog_url,'https://',''),'http://','') || '%'
+
+        GROUP BY
+          cs.commercial_domain,
+          cs.meta_title,
+          cs.meta_description,
+          cs.homepage_checked
+
         ORDER BY total_links DESC
     """)
 
@@ -283,7 +295,6 @@ def export_commercial_sites():
     writer.writeheader()
     writer.writerows(rows)
     buf.seek(0)
-
     return StreamingResponse(buf, media_type="text/csv")
 
 # =========================================================
@@ -295,13 +306,18 @@ def export_blog_summary():
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT root.blog_url,
-               COUNT(DISTINCT cs.commercial_domain) AS unique_commercial_sites,
-               ROUND(100.0 * SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END)
-               / NULLIF(COUNT(ol.id),0),2) AS dofollow_percent,
-               BOOL_OR(ol.is_casino) AS casino_present
+        SELECT
+            root.blog_url,
+            COUNT(DISTINCT cs.commercial_domain) AS unique_commercial_sites,
+            ROUND(
+                100.0 * SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END)
+                / NULLIF(COUNT(ol.id),0),2
+            ) AS dofollow_percent,
+            BOOL_OR(ol.is_casino) AS casino_present
         FROM blog_pages root
-        JOIN blog_pages bp ON bp.blog_url ILIKE '%' || replace(replace(root.blog_url,'https://',''),'http://','') || '%'
+        JOIN blog_pages bp
+          ON bp.blog_url ILIKE '%' ||
+             replace(replace(root.blog_url,'https://',''),'http://','') || '%'
         JOIN outbound_links ol ON ol.blog_page_id = bp.id
         JOIN commercial_sites cs ON ol.url ILIKE '%' || cs.commercial_domain || '%'
         WHERE root.is_root = TRUE
@@ -321,7 +337,6 @@ def export_blog_summary():
     writer.writeheader()
     writer.writerows(rows)
     buf.seek(0)
-
     return StreamingResponse(buf, media_type="text/csv")
 
 # =========================================================
