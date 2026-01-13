@@ -12,12 +12,12 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 from urllib.parse import urlparse
 
-print("### BLOG LEAD CRAWLER — SAFE WP REST FALLBACK + REAL INTENT VERSION RUNNING ###")
+print("### BLOG LEAD CRAWLER — SAFE WP REST FALLBACK + FINAL ANALYTICS VERSION RUNNING ###")
 
 # =========================================================
 # APP INIT
 # =========================================================
-app = FastAPI(title="Blog Lead Crawler API", version="1.3.9")
+app = FastAPI(title="Blog Lead Crawler API", version="1.4.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -99,7 +99,6 @@ def discover_posts_via_wp_api(blog_url: str):
 # =========================================================
 def discover_blog_posts(blog_url: str):
     discovered = set()
-
     for sm in [f"{blog_url}/wp-sitemap.xml", f"{blog_url}/sitemap.xml"]:
         parse_sitemap(sm, discovered)
 
@@ -233,7 +232,7 @@ def export_blog_page_links():
     return StreamingResponse(buf, media_type="text/csv")
 
 # =========================================================
-# EXPORT — COMMERCIAL SITES (UPDATED WITH FINAL SQL)
+# EXPORT — COMMERCIAL SITES (FINAL, VERIFIED)
 # =========================================================
 @app.get("/export/commercial-sites")
 def export_commercial_sites():
@@ -242,44 +241,38 @@ def export_commercial_sites():
 
     cur.execute("""
         SELECT
-          cs.commercial_domain,
-
-          COUNT(ol.id) AS total_links,
-          COUNT(DISTINCT root.blog_url) AS unique_blogs,
-          COUNT(DISTINCT bp.id) AS unique_blog_pages,
-
-          COUNT(*) FILTER (WHERE ol.is_casino = TRUE) AS casino_links_count,
-
-          ROUND(
-            100.0 * COUNT(*) FILTER (WHERE ol.is_casino = TRUE)
-            / NULLIF(COUNT(ol.id), 0),
-          2) AS casino_links_percent,
-
-          ROUND(
-            100.0 * SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END)
-            / NULLIF(COUNT(ol.id), 0),
-          2) AS dofollow_percent,
-
-          cs.meta_title AS root_domain_title,
-          cs.meta_description AS root_domain_meta_description,
-          cs.homepage_checked AS homepage_checked_at
-
+            cs.commercial_domain                              AS commercial_domain,
+            COUNT(ol.id)                                      AS total_links,
+            COUNT(DISTINCT root.blog_url)                     AS unique_blogs,
+            COUNT(DISTINCT bp.id)                             AS unique_blog_pages,
+            SUM(CASE WHEN ol.is_casino THEN 1 ELSE 0 END)     AS casino_links,
+            ROUND(
+                100.0 * SUM(CASE WHEN ol.is_casino THEN 1 ELSE 0 END)
+                / NULLIF(COUNT(ol.id), 0), 2
+            )                                                  AS casino_link_percent,
+            ROUND(
+                100.0 * SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END)
+                / NULLIF(COUNT(ol.id), 0), 2
+            )                                                  AS dofollow_percent,
+            ROUND(
+                100.0 * SUM(CASE WHEN ol.is_dofollow = FALSE THEN 1 ELSE 0 END)
+                / NULLIF(COUNT(ol.id), 0), 2
+            )                                                  AS nofollow_percent,
+            cs.meta_title                                     AS root_domain_title,
+            cs.meta_description                               AS root_domain_description,
+            cs.homepage_checked                               AS homepage_checked
         FROM commercial_sites cs
-        JOIN outbound_links ol
-          ON ol.url ILIKE '%' || cs.commercial_domain || '%'
-        JOIN blog_pages bp
-          ON bp.id = ol.blog_page_id
+        JOIN outbound_links ol ON ol.url ILIKE '%' || cs.commercial_domain || '%'
+        JOIN blog_pages bp ON bp.id = ol.blog_page_id
         JOIN blog_pages root
           ON root.is_root = TRUE
          AND bp.blog_url ILIKE '%' ||
              replace(replace(root.blog_url,'https://',''),'http://','') || '%'
-
         GROUP BY
-          cs.commercial_domain,
-          cs.meta_title,
-          cs.meta_description,
-          cs.homepage_checked
-
+            cs.commercial_domain,
+            cs.meta_title,
+            cs.meta_description,
+            cs.homepage_checked
         ORDER BY total_links DESC
     """)
 
