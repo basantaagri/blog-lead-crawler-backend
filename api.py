@@ -12,12 +12,12 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 from urllib.parse import urlparse
 
-print("### BLOG LEAD CRAWLER — SAFE WP REST FALLBACK VERSION RUNNING ###")
+print("### BLOG LEAD CRAWLER — SAFE WP REST FALLBACK + REAL INTENT VERSION RUNNING ###")
 
 # =========================================================
 # APP INIT
 # =========================================================
-app = FastAPI(title="Blog Lead Crawler API", version="1.3.8")
+app = FastAPI(title="Blog Lead Crawler API", version="1.3.9")
 
 app.add_middleware(
     CORSMiddleware,
@@ -80,7 +80,7 @@ def parse_sitemap(url: str, collected: set):
         pass
 
 # =========================================================
-# WP REST API FALLBACK (CRITICAL FIX)
+# WP REST API FALLBACK
 # =========================================================
 def discover_posts_via_wp_api(blog_url: str):
     posts = set()
@@ -96,20 +96,14 @@ def discover_posts_via_wp_api(blog_url: str):
     return posts
 
 # =========================================================
-# BLOG POST DISCOVERY (SAFE)
+# BLOG POST DISCOVERY
 # =========================================================
 def discover_blog_posts(blog_url: str):
     discovered = set()
 
-    sitemap_urls = [
-        f"{blog_url}/wp-sitemap.xml",
-        f"{blog_url}/sitemap.xml"
-    ]
-
-    for sm in sitemap_urls:
+    for sm in [f"{blog_url}/wp-sitemap.xml", f"{blog_url}/sitemap.xml"]:
         parse_sitemap(sm, discovered)
 
-    # 🔥 FALLBACK — WordPress REST API
     if not discovered:
         discovered |= discover_posts_via_wp_api(blog_url)
 
@@ -135,7 +129,7 @@ def extract_outbound_links(page_url: str):
     return links
 
 # =========================================================
-# CRAWL BLOG (ROOT + POSTS)
+# CRAWL BLOG
 # =========================================================
 @app.post("/crawl")
 def crawl_blog(req: CrawlRequest):
@@ -208,18 +202,24 @@ def crawl_links(req: CrawlRequest):
     }
 
 # =========================================================
-# EXPORTS (UNCHANGED)
+# EXPORT — BLOG → PAGE → LINKS
 # =========================================================
 @app.get("/export/blog-page-links")
 def export_blog_page_links():
     conn = get_db()
     cur = conn.cursor()
+
     cur.execute("""
-        SELECT bp.blog_url, ol.url AS commercial_url, ol.is_dofollow, ol.is_casino
+        SELECT
+            bp.blog_url,
+            ol.url AS commercial_url,
+            ol.is_dofollow,
+            ol.is_casino
         FROM outbound_links ol
         JOIN blog_pages bp ON bp.id = ol.blog_page_id
         ORDER BY bp.blog_url
     """)
+
     rows = cur.fetchall()
     cur.close()
     conn.close()
@@ -232,27 +232,65 @@ def export_blog_page_links():
     writer.writeheader()
     writer.writerows(rows)
     buf.seek(0)
+
     return StreamingResponse(buf, media_type="text/csv")
 
+# =========================================================
+# EXPORT — COMMERCIAL SITES (REAL INTENT)
+# =========================================================
 @app.get("/export/commercial-sites")
 def export_commercial_sites():
     conn = get_db()
     cur = conn.cursor()
+
     cur.execute("""
-        SELECT cs.commercial_domain,
-               COUNT(ol.id) AS total_links,
-               ROUND(100.0 * SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END) / NULLIF(COUNT(ol.id),0),2) AS dofollow_percent,
-               BOOL_OR(ol.is_casino) AS is_casino,
-               cs.meta_title, cs.meta_description, cs.homepage_checked,
-               COUNT(DISTINCT root.blog_url) AS blogs_linking_count
+        WITH intent AS (
+            SELECT
+                cs.commercial_domain,
+                cs.meta_title,
+                cs.meta_description,
+                BOOL_OR(ol.url ILIKE '%casino%' OR ol.url ILIKE '%bet%') AS casino_url,
+                BOOL_OR(ol.url ILIKE '%crypto%' OR ol.url ILIKE '%bitcoin%') AS crypto_url,
+                BOOL_OR(ol.url ILIKE '%loan%' OR ol.url ILIKE '%insurance%') AS finance_url,
+                BOOL_OR(ol.url ILIKE '%porn%' OR ol.url ILIKE '%xxx%') AS adult_url
+            FROM commercial_sites cs
+            JOIN outbound_links ol ON ol.url ILIKE '%' || cs.commercial_domain || '%'
+            GROUP BY cs.commercial_domain, cs.meta_title, cs.meta_description
+        )
+        SELECT
+            cs.commercial_domain            AS "Commercial Domain",
+            COUNT(DISTINCT root.blog_url)   AS "Number of Blogs",
+            COUNT(ol.id)                    AS "Total Links",
+
+            ROUND(100.0 * SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END)
+            / NULLIF(COUNT(ol.id),0),2)     AS "% Dofollow",
+
+            ROUND(100.0 * SUM(CASE WHEN ol.is_dofollow = FALSE THEN 1 ELSE 0 END)
+            / NULLIF(COUNT(ol.id),0),2)     AS "% Nofollow",
+
+            cs.meta_title                   AS "Meta Title",
+            cs.meta_description             AS "Meta Description",
+
+            CASE WHEN i.casino_url THEN 'Strong' ELSE 'None' END AS "Casino Intent",
+            CASE WHEN i.casino_url THEN 0.9 ELSE 0 END           AS "Casino Score",
+            CASE WHEN i.finance_url THEN 'Strong' ELSE 'None' END AS "Finance Intent",
+            CASE WHEN i.crypto_url THEN 'Strong' ELSE 'None' END  AS "Crypto Intent",
+            CASE WHEN i.adult_url THEN 'Strong' ELSE 'None' END   AS "Adult Intent"
+
         FROM commercial_sites cs
         JOIN outbound_links ol ON ol.url ILIKE '%' || cs.commercial_domain || '%'
         JOIN blog_pages bp ON bp.id = ol.blog_page_id
         JOIN blog_pages root ON root.is_root = TRUE
          AND bp.blog_url ILIKE '%' || replace(replace(root.blog_url,'https://',''),'http://','') || '%'
-        GROUP BY cs.commercial_domain, cs.meta_title, cs.meta_description, cs.homepage_checked
-        ORDER BY total_links DESC
+        JOIN intent i ON i.commercial_domain = cs.commercial_domain
+        GROUP BY
+            cs.commercial_domain,
+            cs.meta_title,
+            cs.meta_description,
+            i.casino_url, i.crypto_url, i.finance_url, i.adult_url
+        ORDER BY "Total Links" DESC
     """)
+
     rows = cur.fetchall()
     cur.close()
     conn.close()
@@ -265,17 +303,24 @@ def export_commercial_sites():
     writer.writeheader()
     writer.writerows(rows)
     buf.seek(0)
+
     return StreamingResponse(buf, media_type="text/csv")
 
+# =========================================================
+# EXPORT — BLOG SUMMARY
+# =========================================================
 @app.get("/export/blog-summary")
 def export_blog_summary():
     conn = get_db()
     cur = conn.cursor()
+
     cur.execute("""
-        SELECT root.blog_url,
-               COUNT(DISTINCT cs.commercial_domain) AS unique_commercial_sites,
-               ROUND(100.0 * SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END) / NULLIF(COUNT(ol.id),0),2) AS dofollow_percent,
-               BOOL_OR(ol.is_casino) AS casino_present
+        SELECT
+            root.blog_url,
+            COUNT(DISTINCT cs.commercial_domain) AS unique_commercial_sites,
+            ROUND(100.0 * SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END)
+            / NULLIF(COUNT(ol.id),0),2) AS dofollow_percent,
+            BOOL_OR(ol.is_casino) AS casino_present
         FROM blog_pages root
         JOIN blog_pages bp ON bp.blog_url ILIKE '%' || replace(replace(root.blog_url,'https://',''),'http://','') || '%'
         JOIN outbound_links ol ON ol.blog_page_id = bp.id
@@ -284,6 +329,7 @@ def export_blog_summary():
         GROUP BY root.blog_url
         ORDER BY root.blog_url
     """)
+
     rows = cur.fetchall()
     cur.close()
     conn.close()
@@ -296,8 +342,12 @@ def export_blog_summary():
     writer.writeheader()
     writer.writerows(rows)
     buf.seek(0)
+
     return StreamingResponse(buf, media_type="text/csv")
 
+# =========================================================
+# HISTORY
+# =========================================================
 @app.get("/history")
 def history():
     conn = get_db()
@@ -313,6 +363,9 @@ def history():
     conn.close()
     return rows
 
+# =========================================================
+# PROGRESS
+# =========================================================
 @app.get("/progress")
 def progress():
     return {
