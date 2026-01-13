@@ -7,15 +7,17 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import psycopg2
 from psycopg2.extras import RealDictCursor
-import os, csv, io
+import os, csv, io, requests
+from bs4 import BeautifulSoup
 from datetime import datetime
+from urllib.parse import urlparse
 
-print("### BLOG LEAD CRAWLER — BASELINE SAFE VERSION RUNNING ###")
+print("### BLOG LEAD CRAWLER — SAFE DISCOVERY + EXTRACTION VERSION RUNNING ###")
 
 # =========================================================
 # APP INIT
 # =========================================================
-app = FastAPI(title="Blog Lead Crawler API", version="1.3.5")
+app = FastAPI(title="Blog Lead Crawler API", version="1.3.6")
 
 app.add_middleware(
     CORSMiddleware,
@@ -54,7 +56,55 @@ def health():
     return {"status": "ok"}
 
 # =========================================================
-# CRAWL BLOG (ROOT ONLY)
+# FIX 1 — BLOG POST DISCOVERY (SAFE)
+# =========================================================
+def discover_blog_posts(blog_url: str):
+    discovered = set()
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    sitemap_urls = [
+        f"{blog_url}/sitemap.xml",
+        f"{blog_url}/post-sitemap.xml"
+    ]
+
+    for sm in sitemap_urls:
+        try:
+            r = requests.get(sm, timeout=10, headers=headers)
+            if r.status_code == 200:
+                soup = BeautifulSoup(r.text, "xml")
+                for loc in soup.find_all("loc"):
+                    url = loc.text.strip()
+                    if any(x in url for x in ["/blog/", "/202", "/post/"]):
+                        discovered.add(url.rstrip("/"))
+        except:
+            pass
+
+    return list(discovered)[:1000]
+
+# =========================================================
+# FIX 2 — OUTBOUND LINK EXTRACTION
+# =========================================================
+def extract_outbound_links(page_url: str):
+    links = []
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    try:
+        r = requests.get(page_url, timeout=10, headers=headers)
+        soup = BeautifulSoup(r.text, "html.parser")
+        base_domain = urlparse(page_url).netloc
+
+        for a in soup.find_all("a", href=True):
+            href = a["href"].strip()
+            if href.startswith("http"):
+                if base_domain not in href:
+                    links.append(href)
+    except:
+        pass
+
+    return links
+
+# =========================================================
+# CRAWL BLOG (ROOT + POSTS)
 # =========================================================
 @app.post("/crawl")
 def crawl_blog(req: CrawlRequest):
@@ -63,25 +113,70 @@ def crawl_blog(req: CrawlRequest):
 
     blog_url = req.blog_url.rstrip("/")
 
+    # Store root
     cur.execute("""
         INSERT INTO blog_pages (blog_url, is_root)
         VALUES (%s, TRUE)
         ON CONFLICT (blog_url) DO NOTHING
     """, (blog_url,))
 
+    # Discover and store blog posts
+    posts = discover_blog_posts(blog_url)
+    for url in posts:
+        cur.execute("""
+            INSERT INTO blog_pages (blog_url, is_root)
+            VALUES (%s, FALSE)
+            ON CONFLICT (blog_url) DO NOTHING
+        """, (url,))
+
     conn.commit()
     cur.close()
     conn.close()
 
-    return {"status": "blog stored"}
+    return {
+        "status": "blog + posts stored",
+        "posts_discovered": len(posts)
+    }
 
 # =========================================================
-# CRAWL LINKS (WORKER TRIGGER ONLY)
+# CRAWL LINKS (ACTUAL EXTRACTION)
 # =========================================================
 @app.post("/crawl-links")
 def crawl_links(req: CrawlRequest):
-    # Worker handles crawling + extraction
-    return {"status": "link crawling started"}
+    conn = get_db()
+    cur = conn.cursor()
+
+    blog_url = req.blog_url.rstrip("/")
+
+    cur.execute("""
+        SELECT id, blog_url
+        FROM blog_pages
+        WHERE is_root = FALSE
+        AND blog_url ILIKE %s
+    """, (f"%{blog_url.replace('https://','').replace('http://','')}%",))
+
+    pages = cur.fetchall()
+    inserted = 0
+
+    for page in pages:
+        links = extract_outbound_links(page["blog_url"])
+        for link in links:
+            cur.execute("""
+                INSERT INTO outbound_links (blog_page_id, url, is_dofollow, is_casino)
+                VALUES (%s, %s, TRUE, FALSE)
+                ON CONFLICT DO NOTHING
+            """, (page["id"], link))
+            inserted += 1
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return {
+        "status": "link crawling completed",
+        "pages_crawled": len(pages),
+        "links_found": inserted
+    }
 
 # =========================================================
 # EXPORT — BLOG → PAGE → LINKS
