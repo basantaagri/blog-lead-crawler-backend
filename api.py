@@ -117,7 +117,7 @@ def export_blog_page_links():
     return StreamingResponse(buf, media_type="text/csv")
 
 # =========================================================
-# EXPORT — COMMERCIAL SITES (STABLE)
+# EXPORT — COMMERCIAL SITES
 # =========================================================
 @app.get("/export/commercial-sites")
 def export_commercial_sites():
