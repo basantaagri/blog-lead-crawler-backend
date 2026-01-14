@@ -219,6 +219,8 @@ def blog_analytics(blog_url: str):
     conn = get_db()
     cur = conn.cursor()
 
+    blog_url = blog_url.rstrip("/")
+
     cur.execute("""
         SELECT
             COUNT(DISTINCT bp.id) AS pages_crawled,
@@ -244,6 +246,11 @@ def blog_analytics(blog_url: str):
     """, (blog_url,))
 
     summary = cur.fetchone()
+
+    if not summary:
+        cur.close()
+        conn.close()
+        raise HTTPException(status_code=404, detail="Blog not found")
 
     cur.execute("""
         SELECT
