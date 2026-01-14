@@ -12,10 +12,10 @@ import os
 import csv
 import io
 
-print("### BLOG LEAD CRAWLER API v1.3.6 — STABLE + SAFE DELETE (LOCKED) ###")
+print("### BLOG LEAD CRAWLER API v1.3.6 — STABLE + SAFE DELETE (LOCKED) + SCORING ###")
 
 # =========================================================
-# 🔐 ADMIN DELETE LOCK (ONLY NEW LINE)
+# 🔐 ADMIN DELETE LOCK
 # =========================================================
 ENABLE_ADMIN_DELETE = os.getenv("ENABLE_ADMIN_DELETE", "false").lower() == "true"
 
@@ -91,7 +91,6 @@ def crawl_links(req: CrawlRequest):
     if not blog_url:
         raise HTTPException(400, "blog_url required")
 
-    # Worker already exists in your build
     return {"status": "ok"}
 
 # =========================================================
@@ -122,10 +121,7 @@ def analytics_blog(blog_url: str):
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """
-                SELECT COUNT(*) FROM blog_pages
-                WHERE blog_url = %s
-                """,
+                "SELECT COUNT(*) FROM blog_pages WHERE blog_url = %s",
                 (blog_url,),
             )
             pages = cur.fetchone()["count"]
@@ -171,6 +167,59 @@ def analytics_blog(blog_url: str):
         "casino_percentage": round(stats["casino_pct"] or 0, 2),
         "commercial_domains": breakdown,
     }
+
+# =========================================================
+# 🧮 LEAD SCORING — NEW ENDPOINT (READ-ONLY)
+# =========================================================
+@app.get("/score/commercial-sites")
+def score_commercial_sites():
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    cs.commercial_domain,
+                    cs.total_links,
+                    cs.dofollow_percent,
+                    cs.is_casino,
+                    COUNT(DISTINCT bp.blog_url) AS blog_count
+                FROM commercial_sites cs
+                LEFT JOIN outbound_links ol
+                    ON ol.commercial_domain = cs.commercial_domain
+                LEFT JOIN blog_pages bp
+                    ON bp.id = ol.blog_page_id
+                GROUP BY
+                    cs.commercial_domain,
+                    cs.total_links,
+                    cs.dofollow_percent,
+                    cs.is_casino
+                """
+            )
+            rows = cur.fetchall()
+
+    scored = []
+
+    for r in rows:
+        score = (
+            min(r["total_links"], 20) * 2
+            + (r["dofollow_percent"] or 0) * 0.4
+            + (r["blog_count"] or 0) * 5
+            - (30 if r["is_casino"] else 0)
+        )
+
+        score = max(0, min(100, round(score)))
+
+        scored.append({
+            "commercial_domain": r["commercial_domain"],
+            "score": score,
+            "total_links": r["total_links"],
+            "dofollow_percent": r["dofollow_percent"],
+            "blog_count": r["blog_count"],
+            "is_casino": r["is_casino"],
+        })
+
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    return scored
 
 # =========================================================
 # CSV HELPER
@@ -276,7 +325,7 @@ def export_blog_summary():
     )
 
 # =========================================================
-# 🔐 SAFE DELETE — GUARDED BY ENV FLAG (ONLY LOGIC CHANGE)
+# 🔐 SAFE DELETE — GUARDED BY ENV FLAG
 # =========================================================
 @app.delete("/admin/delete-blog")
 def delete_blog(blog_url: str = Query(...)):
@@ -288,8 +337,6 @@ def delete_blog(blog_url: str = Query(...)):
 
     with get_conn() as conn:
         with conn.cursor() as cur:
-
-            # 1️⃣ Find blog page IDs
             cur.execute(
                 "SELECT id FROM blog_pages WHERE blog_url = %s",
                 (blog_url,),
@@ -299,18 +346,14 @@ def delete_blog(blog_url: str = Query(...)):
             if not page_ids:
                 return {"status": "not_found"}
 
-            # 2️⃣ Delete outbound links
             cur.execute(
                 "DELETE FROM outbound_links WHERE blog_page_id = ANY(%s)",
                 (page_ids,),
             )
-
-            # 3️⃣ Delete blog pages
             cur.execute(
                 "DELETE FROM blog_pages WHERE blog_url = %s",
                 (blog_url,),
             )
-
             conn.commit()
 
     return {"status": "deleted", "blog_url": blog_url}
