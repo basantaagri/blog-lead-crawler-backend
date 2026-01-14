@@ -10,12 +10,12 @@ from psycopg2.extras import RealDictCursor
 import os, csv, io
 from datetime import datetime
 
-print("### BLOG LEAD CRAWLER — STABLE EXPORT VERSION RUNNING ###")
+print("### BLOG LEAD CRAWLER — STABLE EXPORT + ANALYTICS VERSION RUNNING ###")
 
 # =========================================================
 # APP INIT
 # =========================================================
-app = FastAPI(title="Blog Lead Crawler API", version="1.3.5")
+app = FastAPI(title="Blog Lead Crawler API", version="1.3.6")
 
 app.add_middleware(
     CORSMiddleware,
@@ -80,7 +80,6 @@ def crawl_blog(req: CrawlRequest):
 # =========================================================
 @app.post("/crawl-links")
 def crawl_links(req: CrawlRequest):
-    # Worker does crawling — API stays light
     return {"status": "link crawling started"}
 
 # =========================================================
@@ -211,6 +210,76 @@ def export_blog_summary():
     buf.seek(0)
 
     return StreamingResponse(buf, media_type="text/csv")
+
+# =========================================================
+# ✅ PER-BLOG ANALYTICS (READ-ONLY, SAFE)
+# =========================================================
+@app.get("/analytics/blog")
+def blog_analytics(blog_url: str):
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT
+            COUNT(DISTINCT bp.id) AS pages_crawled,
+            COUNT(ol.id) AS total_outbound_links,
+            COUNT(DISTINCT cs.commercial_domain) AS unique_commercial_domains,
+            SUM(CASE WHEN ol.is_casino THEN 1 ELSE 0 END) AS casino_links,
+            ROUND(
+                100.0 * SUM(CASE WHEN ol.is_casino THEN 1 ELSE 0 END)
+                / NULLIF(COUNT(ol.id), 0), 2
+            ) AS casino_percentage,
+            ROUND(
+                100.0 * SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END)
+                / NULLIF(COUNT(ol.id), 0), 2
+            ) AS dofollow_percentage
+        FROM blog_pages root
+        JOIN blog_pages bp
+          ON bp.blog_url ILIKE '%' ||
+             replace(replace(root.blog_url,'https://',''),'http://','') || '%'
+        JOIN outbound_links ol ON ol.blog_page_id = bp.id
+        JOIN commercial_sites cs ON ol.url ILIKE '%' || cs.commercial_domain || '%'
+        WHERE root.is_root = TRUE
+          AND root.blog_url = %s
+    """, (blog_url,))
+
+    summary = cur.fetchone()
+
+    cur.execute("""
+        SELECT
+            cs.commercial_domain,
+            COUNT(ol.id) AS total_links,
+            ROUND(
+                100.0 * SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END)
+                / NULLIF(COUNT(ol.id), 0), 2
+            ) AS dofollow_percent,
+            SUM(CASE WHEN ol.is_casino THEN 1 ELSE 0 END) AS casino_links,
+            ROUND(
+                100.0 * SUM(CASE WHEN ol.is_casino THEN 1 ELSE 0 END)
+                / NULLIF(COUNT(ol.id), 0), 2
+            ) AS casino_percent
+        FROM blog_pages root
+        JOIN blog_pages bp
+          ON bp.blog_url ILIKE '%' ||
+             replace(replace(root.blog_url,'https://',''),'http://','') || '%'
+        JOIN outbound_links ol ON ol.blog_page_id = bp.id
+        JOIN commercial_sites cs ON ol.url ILIKE '%' || cs.commercial_domain || '%'
+        WHERE root.is_root = TRUE
+          AND root.blog_url = %s
+        GROUP BY cs.commercial_domain
+        ORDER BY total_links DESC
+    """, (blog_url,))
+
+    breakdown = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    return {
+        "blog_url": blog_url,
+        "summary": summary,
+        "commercial_breakdown": breakdown
+    }
 
 # =========================================================
 # HISTORY
