@@ -12,7 +12,12 @@ import os
 import csv
 import io
 
-print("### BLOG LEAD CRAWLER API v1.3.6 — STABLE + SAFE DELETE ###")
+print("### BLOG LEAD CRAWLER API v1.3.6 — STABLE + SAFE DELETE (LOCKED) ###")
+
+# =========================================================
+# 🔐 ADMIN DELETE LOCK (ONLY NEW LINE)
+# =========================================================
+ENABLE_ADMIN_DELETE = os.getenv("ENABLE_ADMIN_DELETE", "false").lower() == "true"
 
 # =========================================================
 # APP INIT
@@ -223,7 +228,10 @@ def export_commercial_sites():
     return StreamingResponse(
         csv_stream(
             ["domain", "total_links", "dofollow_percent", "casino"],
-            [(r["commercial_domain"], r["total_links"], r["dofollow_percent"], r["is_casino"]) for r in rows],
+            [
+                (r["commercial_domain"], r["total_links"], r["dofollow_percent"], r["is_casino"])
+                for r in rows
+            ],
         ),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=commercial_sites.csv"},
@@ -268,10 +276,13 @@ def export_blog_summary():
     )
 
 # =========================================================
-# 🔐 SAFE DELETE — ADDITION ONLY (ADMIN)
+# 🔐 SAFE DELETE — GUARDED BY ENV FLAG (ONLY LOGIC CHANGE)
 # =========================================================
 @app.delete("/admin/delete-blog")
 def delete_blog(blog_url: str = Query(...)):
+    if not ENABLE_ADMIN_DELETE:
+        raise HTTPException(status_code=403, detail="Admin delete is locked")
+
     if not blog_url:
         raise HTTPException(400, "blog_url required")
 
