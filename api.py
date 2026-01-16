@@ -5,7 +5,6 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from datetime import datetime
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
@@ -60,7 +59,7 @@ def health():
     return {"status": "ok"}
 
 # =========================================================
-# DISCOVER BLOG POSTS
+# DISCOVER BLOG ROOT
 # =========================================================
 @app.post("/crawl")
 def crawl_blog(req: CrawlRequest):
@@ -83,14 +82,12 @@ def crawl_blog(req: CrawlRequest):
     return {"status": "ok"}
 
 # =========================================================
-# CRAWL OUTBOUND LINKS (WORKER TRIGGER)
+# WORKER TRIGGER (NO LOGIC HERE)
 # =========================================================
 @app.post("/crawl-links")
 def crawl_links(req: CrawlRequest):
-    blog_url = req.blog_url.strip()
-    if not blog_url:
+    if not req.blog_url.strip():
         raise HTTPException(400, "blog_url required")
-
     return {"status": "ok"}
 
 # =========================================================
@@ -107,11 +104,10 @@ def history():
                 ORDER BY first_crawled DESC
                 """
             )
-            rows = cur.fetchall()
-    return rows
+            return cur.fetchall()
 
 # =========================================================
-# ANALYTICS — PER BLOG
+# ANALYTICS — PER BLOG (FIXED)
 # =========================================================
 @app.get("/analytics/blog")
 def analytics_blog(blog_url: str):
@@ -120,21 +116,26 @@ def analytics_blog(blog_url: str):
 
     with get_conn() as conn:
         with conn.cursor() as cur:
+
+            # Pages count
             cur.execute(
                 "SELECT COUNT(*) FROM blog_pages WHERE blog_url = %s",
                 (blog_url,),
             )
             pages = cur.fetchone()["count"]
 
+            # Stats (JOIN commercial_sites)
             cur.execute(
                 """
                 SELECT
                     COUNT(*) AS total_links,
-                    COUNT(DISTINCT commercial_domain) AS unique_domains,
-                    AVG(CASE WHEN is_dofollow THEN 1 ELSE 0 END) * 100 AS dofollow_pct,
-                    AVG(CASE WHEN is_casino THEN 1 ELSE 0 END) * 100 AS casino_pct
-                FROM outbound_links
-                WHERE blog_page_id IN (
+                    COUNT(DISTINCT cs.commercial_domain) AS unique_domains,
+                    AVG(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END) * 100 AS dofollow_pct,
+                    AVG(CASE WHEN cs.is_casino THEN 1 ELSE 0 END) * 100 AS casino_pct
+                FROM outbound_links ol
+                JOIN commercial_sites cs
+                    ON cs.commercial_domain = ol.commercial_domain
+                WHERE ol.blog_page_id IN (
                     SELECT id FROM blog_pages WHERE blog_url = %s
                 )
                 """,
@@ -142,34 +143,16 @@ def analytics_blog(blog_url: str):
             )
             stats = cur.fetchone()
 
-            cur.execute(
-                """
-                SELECT commercial_domain,
-                       COUNT(*) AS links,
-                       AVG(CASE WHEN is_dofollow THEN 1 ELSE 0 END) * 100 AS dofollow_pct,
-                       BOOL_OR(is_casino) AS is_casino
-                FROM outbound_links
-                WHERE blog_page_id IN (
-                    SELECT id FROM blog_pages WHERE blog_url = %s
-                )
-                GROUP BY commercial_domain
-                ORDER BY links DESC
-                """,
-                (blog_url,),
-            )
-            breakdown = cur.fetchall()
-
     return {
-        "pages_crawled": pages,
+        "pages_crawled": pages or 0,
         "total_outbound_links": stats["total_links"] or 0,
         "unique_commercial_domains": stats["unique_domains"] or 0,
         "dofollow_percentage": round(stats["dofollow_pct"] or 0, 2),
         "casino_percentage": round(stats["casino_pct"] or 0, 2),
-        "commercial_domains": breakdown,
     }
 
 # =========================================================
-# 🧮 LEAD SCORING — READ ONLY
+# 🧮 LEAD SCORING (READ ONLY)
 # =========================================================
 @app.get("/score/commercial-sites")
 def score_commercial_sites():
@@ -234,9 +217,10 @@ def export_blog_page_links():
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT bp.blog_url, ol.url, ol.is_dofollow, ol.is_casino
+                SELECT bp.blog_url, ol.url, ol.is_dofollow, cs.is_casino
                 FROM outbound_links ol
                 JOIN blog_pages bp ON bp.id = ol.blog_page_id
+                JOIN commercial_sites cs ON cs.commercial_domain = ol.commercial_domain
                 """
             )
             rows = cur.fetchall()
@@ -282,9 +266,10 @@ def export_blog_summary():
                     bp.blog_url,
                     COUNT(DISTINCT ol.commercial_domain) AS commercial_domains,
                     AVG(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END) * 100 AS dofollow_pct,
-                    BOOL_OR(ol.is_casino) AS has_casino
+                    BOOL_OR(cs.is_casino) AS has_casino
                 FROM blog_pages bp
                 LEFT JOIN outbound_links ol ON ol.blog_page_id = bp.id
+                LEFT JOIN commercial_sites cs ON cs.commercial_domain = ol.commercial_domain
                 GROUP BY bp.blog_url
                 """
             )
@@ -300,7 +285,7 @@ def export_blog_summary():
     )
 
 # =========================================================
-# 🔐 SAFE DELETE
+# 🔐 SAFE DELETE (LOCKED)
 # =========================================================
 @app.delete("/admin/delete-blog")
 def delete_blog(blog_url: str = Query(...)):
@@ -309,8 +294,11 @@ def delete_blog(blog_url: str = Query(...)):
 
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM outbound_links WHERE blog_page_id IN (SELECT id FROM blog_pages WHERE blog_url=%s)", (blog_url,))
+            cur.execute(
+                "DELETE FROM outbound_links WHERE blog_page_id IN (SELECT id FROM blog_pages WHERE blog_url=%s)",
+                (blog_url,),
+            )
             cur.execute("DELETE FROM blog_pages WHERE blog_url=%s", (blog_url,))
             conn.commit()
 
-    return {"status": "deleted"}
+    return {"status": "deleted", "blog_url": blog_url}
