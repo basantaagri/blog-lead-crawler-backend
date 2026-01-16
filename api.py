@@ -9,18 +9,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import os, csv, io
 
-# 🔥 RESTORED ONE-FLOW IMPORTS (ALREADY EXIST IN YOUR FOLDER)
-from crawl_blog_basic import discover_blog_pages
-from crawl_page_outbound_links import crawl_pages_and_extract_links
-from extract_commercial_links import consolidate_commercial_links
-from detect_casino_sites import detect_and_update_casino_sites
-
-print("### BLOG LEAD CRAWLER API v1.3.6 — AUTO EXTRACT RESTORED (STABLE) ###")
-
-# =========================================================
-# 🔐 ADMIN DELETE LOCK
-# =========================================================
-ENABLE_ADMIN_DELETE = os.getenv("ENABLE_ADMIN_DELETE", "false").lower() == "true"
+print("### BLOG LEAD CRAWLER API v1.3.6 — STABLE + AUTO EXTRACT RESTORED ###")
 
 # =========================================================
 # APP INIT
@@ -60,7 +49,7 @@ def health():
     return {"status": "ok"}
 
 # =========================================================
-# 🚀 CRAWL — FULL AUTO FLOW (OLD BEHAVIOR RESTORED)
+# 🚀 ONE-FLOW CRAWL (OLD BEHAVIOR RESTORED)
 # =========================================================
 @app.post("/crawl")
 def crawl_blog(req: CrawlRequest):
@@ -68,7 +57,7 @@ def crawl_blog(req: CrawlRequest):
     if not blog_url:
         raise HTTPException(400, "blog_url required")
 
-    # 1️⃣ Save blog root
+    # save root blog
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -81,23 +70,14 @@ def crawl_blog(req: CrawlRequest):
             )
             conn.commit()
 
-    # 2️⃣ Discover blog pages
-    pages = discover_blog_pages(blog_url)
+    # 🔥 AUTO extraction (old behavior)
+    try:
+        from services.orchestrator import CrawlOrchestrator
+        CrawlOrchestrator().run_for_blog(blog_url)
+    except Exception as e:
+        print("AUTO EXTRACT ERROR:", e)
 
-    # 3️⃣ Crawl pages & extract outbound links
-    crawl_pages_and_extract_links(pages)
-
-    # 4️⃣ Consolidate commercial domains
-    consolidate_commercial_links()
-
-    # 5️⃣ Detect casino sites
-    detect_and_update_casino_sites()
-
-    return {
-        "status": "completed",
-        "pages_discovered": len(pages),
-        "message": "Blog crawled and outbound links extracted"
-    }
+    return {"status": "ok", "message": "crawl + extraction complete"}
 
 # =========================================================
 # HISTORY
@@ -116,108 +96,17 @@ def history():
             return cur.fetchall()
 
 # =========================================================
-# ANALYTICS — PER BLOG
-# =========================================================
-@app.get("/analytics/blog")
-def analytics_blog(blog_url: str):
-    if not blog_url:
-        raise HTTPException(400, "blog_url required")
-
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-
-            cur.execute(
-                "SELECT COUNT(*) FROM blog_pages WHERE blog_url = %s",
-                (blog_url,),
-            )
-            pages = cur.fetchone()["count"]
-
-            cur.execute(
-                """
-                SELECT
-                    COUNT(*) AS total_links,
-                    COUNT(DISTINCT cs.commercial_domain) AS unique_domains,
-                    AVG(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END) * 100 AS dofollow_pct,
-                    AVG(CASE WHEN cs.is_casino THEN 1 ELSE 0 END) * 100 AS casino_pct
-                FROM outbound_links ol
-                JOIN commercial_sites cs
-                    ON cs.commercial_domain = ol.commercial_domain
-                WHERE ol.blog_page_id IN (
-                    SELECT id FROM blog_pages WHERE blog_url = %s
-                )
-                """,
-                (blog_url,),
-            )
-            stats = cur.fetchone()
-
-    return {
-        "pages_crawled": pages or 0,
-        "total_outbound_links": stats["total_links"] or 0,
-        "unique_commercial_domains": stats["unique_domains"] or 0,
-        "dofollow_percentage": round(stats["dofollow_pct"] or 0, 2),
-        "casino_percentage": round(stats["casino_pct"] or 0, 2),
-    }
-
-# =========================================================
-# 🧮 LEAD SCORING
-# =========================================================
-@app.get("/score/commercial-sites")
-def score_commercial_sites():
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT
-                    cs.commercial_domain,
-                    cs.total_links,
-                    cs.dofollow_percent,
-                    cs.is_casino,
-                    COUNT(DISTINCT bp.blog_url) AS blog_count
-                FROM commercial_sites cs
-                LEFT JOIN outbound_links ol
-                    ON ol.commercial_domain = cs.commercial_domain
-                LEFT JOIN blog_pages bp
-                    ON bp.id = ol.blog_page_id
-                GROUP BY
-                    cs.commercial_domain,
-                    cs.total_links,
-                    cs.dofollow_percent,
-                    cs.is_casino
-                """
-            )
-            rows = cur.fetchall()
-
-    scored = []
-    for r in rows:
-        score = (
-            min(r["total_links"], 20) * 2
-            + (r["dofollow_percent"] or 0) * 0.4
-            + (r["blog_count"] or 0) * 5
-            - (30 if r["is_casino"] else 0)
-        )
-        scored.append({
-            "commercial_domain": r["commercial_domain"],
-            "score": max(0, min(100, round(score))),
-        })
-
-    scored.sort(key=lambda x: x["score"], reverse=True)
-    return scored
-
-# =========================================================
-# CSV HELPER
-# =========================================================
-def csv_stream(headers, rows):
-    buffer = io.StringIO()
-    writer = csv.writer(buffer)
-    writer.writerow(headers)
-    for row in rows:
-        writer.writerow(row)
-    buffer.seek(0)
-    return buffer
-
-# =========================================================
 # EXPORTS
 # =========================================================
+def csv_stream(headers, rows):
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(headers)
+    for r in rows:
+        w.writerow(r)
+    buf.seek(0)
+    return buf
+
 @app.get("/export/blog-page-links")
 def export_blog_page_links():
     with get_conn() as conn:
@@ -238,74 +127,4 @@ def export_blog_page_links():
             [(r["blog_url"], r["url"], r["is_dofollow"], r["is_casino"]) for r in rows],
         ),
         media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=blog_page_links.csv"},
     )
-
-@app.get("/export/commercial-sites")
-def export_commercial_sites():
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT commercial_domain, total_links, dofollow_percent, is_casino
-                FROM commercial_sites
-                ORDER BY total_links DESC
-                """
-            )
-            rows = cur.fetchall()
-
-    return StreamingResponse(
-        csv_stream(
-            ["domain", "total_links", "dofollow_percent", "casino"],
-            [(r["commercial_domain"], r["total_links"], r["dofollow_percent"], r["is_casino"]) for r in rows],
-        ),
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=commercial_sites.csv"},
-    )
-
-@app.get("/export/blog-summary")
-def export_blog_summary():
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT
-                    bp.blog_url,
-                    COUNT(DISTINCT ol.commercial_domain) AS commercial_domains,
-                    AVG(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END) * 100 AS dofollow_pct,
-                    BOOL_OR(cs.is_casino) AS has_casino
-                FROM blog_pages bp
-                LEFT JOIN outbound_links ol ON ol.blog_page_id = bp.id
-                LEFT JOIN commercial_sites cs ON cs.commercial_domain = ol.commercial_domain
-                GROUP BY bp.blog_url
-                """
-            )
-            rows = cur.fetchall()
-
-    return StreamingResponse(
-        csv_stream(
-            ["blog_url", "commercial_domains", "dofollow_percent", "has_casino"],
-            [(r["blog_url"], r["commercial_domains"], round(r["dofollow_pct"] or 0, 2), r["has_casino"]) for r in rows],
-        ),
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=blog_summary.csv"},
-    )
-
-# =========================================================
-# 🔐 SAFE DELETE
-# =========================================================
-@app.delete("/admin/delete-blog")
-def delete_blog(blog_url: str = Query(...)):
-    if not ENABLE_ADMIN_DELETE:
-        raise HTTPException(403, "Admin delete is locked")
-
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "DELETE FROM outbound_links WHERE blog_page_id IN (SELECT id FROM blog_pages WHERE blog_url=%s)",
-                (blog_url,),
-            )
-            cur.execute("DELETE FROM blog_pages WHERE blog_url=%s", (blog_url,))
-            conn.commit()
-
-    return {"status": "deleted", "blog_url": blog_url}
