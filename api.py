@@ -169,7 +169,7 @@ def analytics_blog(blog_url: str):
     }
 
 # =========================================================
-# 🧮 LEAD SCORING — NEW ENDPOINT (READ-ONLY)
+# 🧮 LEAD SCORING — READ ONLY
 # =========================================================
 @app.get("/score/commercial-sites")
 def score_commercial_sites():
@@ -198,7 +198,6 @@ def score_commercial_sites():
             rows = cur.fetchall()
 
     scored = []
-
     for r in rows:
         score = (
             min(r["total_links"], 20) * 2
@@ -206,23 +205,16 @@ def score_commercial_sites():
             + (r["blog_count"] or 0) * 5
             - (30 if r["is_casino"] else 0)
         )
-
-        score = max(0, min(100, round(score)))
-
         scored.append({
             "commercial_domain": r["commercial_domain"],
-            "score": score,
-            "total_links": r["total_links"],
-            "dofollow_percent": r["dofollow_percent"],
-            "blog_count": r["blog_count"],
-            "is_casino": r["is_casino"],
+            "score": max(0, min(100, round(score))),
         })
 
     scored.sort(key=lambda x: x["score"], reverse=True)
     return scored
 
 # =========================================================
-# CSV HELPER
+# CSV HELPERS
 # =========================================================
 def csv_stream(headers, rows):
     buffer = io.StringIO()
@@ -234,7 +226,7 @@ def csv_stream(headers, rows):
     return buffer
 
 # =========================================================
-# EXPORT — BLOG → PAGE → LINKS
+# EXPORTS
 # =========================================================
 @app.get("/export/blog-page-links")
 def export_blog_page_links():
@@ -258,9 +250,6 @@ def export_blog_page_links():
         headers={"Content-Disposition": "attachment; filename=blog_page_links.csv"},
     )
 
-# =========================================================
-# EXPORT — COMMERCIAL SITES
-# =========================================================
 @app.get("/export/commercial-sites")
 def export_commercial_sites():
     with get_conn() as conn:
@@ -277,18 +266,12 @@ def export_commercial_sites():
     return StreamingResponse(
         csv_stream(
             ["domain", "total_links", "dofollow_percent", "casino"],
-            [
-                (r["commercial_domain"], r["total_links"], r["dofollow_percent"], r["is_casino"])
-                for r in rows
-            ],
+            [(r["commercial_domain"], r["total_links"], r["dofollow_percent"], r["is_casino"]) for r in rows],
         ),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=commercial_sites.csv"},
     )
 
-# =========================================================
-# EXPORT — BLOG SUMMARY
-# =========================================================
 @app.get("/export/blog-summary")
 def export_blog_summary():
     with get_conn() as conn:
@@ -310,50 +293,24 @@ def export_blog_summary():
     return StreamingResponse(
         csv_stream(
             ["blog_url", "commercial_domains", "dofollow_percent", "has_casino"],
-            [
-                (
-                    r["blog_url"],
-                    r["commercial_domains"],
-                    round(r["dofollow_pct"] or 0, 2),
-                    r["has_casino"],
-                )
-                for r in rows
-            ],
+            [(r["blog_url"], r["commercial_domains"], round(r["dofollow_pct"] or 0, 2), r["has_casino"]) for r in rows],
         ),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=blog_summary.csv"},
     )
 
 # =========================================================
-# 🔐 SAFE DELETE — GUARDED BY ENV FLAG
+# 🔐 SAFE DELETE
 # =========================================================
 @app.delete("/admin/delete-blog")
 def delete_blog(blog_url: str = Query(...)):
     if not ENABLE_ADMIN_DELETE:
-        raise HTTPException(status_code=403, detail="Admin delete is locked")
-
-    if not blog_url:
-        raise HTTPException(400, "blog_url required")
+        raise HTTPException(403, "Admin delete is locked")
 
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT id FROM blog_pages WHERE blog_url = %s",
-                (blog_url,),
-            )
-            page_ids = [r["id"] for r in cur.fetchall()]
-
-            if not page_ids:
-                return {"status": "not_found"}
-
-            cur.execute(
-                "DELETE FROM outbound_links WHERE blog_page_id = ANY(%s)",
-                (page_ids,),
-            )
-            cur.execute(
-                "DELETE FROM blog_pages WHERE blog_url = %s",
-                (blog_url,),
-            )
+            cur.execute("DELETE FROM outbound_links WHERE blog_page_id IN (SELECT id FROM blog_pages WHERE blog_url=%s)", (blog_url,))
+            cur.execute("DELETE FROM blog_pages WHERE blog_url=%s", (blog_url,))
             conn.commit()
 
-    return {"status": "deleted", "blog_url": blog_url}
+    return {"status": "deleted"}
