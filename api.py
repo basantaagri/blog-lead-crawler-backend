@@ -6,6 +6,8 @@ import csv
 import io
 import requests
 import psycopg2
+import threading
+import time
 
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
@@ -16,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-print("### BLOG LEAD CRAWLER API v1.3.6 — REQUEST-BOUND WORKER (RENDER SAFE) ###")
+print("### BLOG LEAD CRAWLER API v1.3.6 — LONG-LIVED WORKER (LOCAL/VPS ONLY) ###")
 
 # =========================================================
 # APP INIT
@@ -123,7 +125,7 @@ def safe_fetch(url: str):
             return None
 
 # =========================================================
-# 🔁 REQUEST-BOUND WORKER (SINGLE BLOG)
+# 🔁 CORE CRAWLER (UNCHANGED LOGIC)
 # =========================================================
 def crawler_worker_single():
     blog = None
@@ -141,7 +143,7 @@ def crawler_worker_single():
             blog = cur.fetchone()
 
             if not blog:
-                return {"status": "no pending blogs"}
+                return None
 
             cur.execute("""
                 UPDATE blog_pages
@@ -193,8 +195,6 @@ def crawler_worker_single():
                 """, (blog_id,))
                 conn.commit()
 
-        return {"status": "completed", "blog": blog_url}
-
     except Exception as e:
         with get_conn() as conn:
             with conn.cursor() as cur:
@@ -204,14 +204,22 @@ def crawler_worker_single():
                     WHERE id = %s
                 """, (blog_id,))
                 conn.commit()
-        return {"status": "failed", "blog": blog_url, "error": str(e)}
+        print(f"❌ Failed blog {blog_url}: {e}")
 
 # =========================================================
-# ▶ RUN WORKER (RENDER SAFE)
+# ♾️ LONG-LIVED WORKER LOOP (RESTORED)
 # =========================================================
-@app.post("/run-once")
-def run_once():
-    return crawler_worker_single()
+def crawler_worker():
+    print("### LONG-LIVED CRAWLER WORKER STARTED ###")
+    while True:
+        job = crawler_worker_single()
+        if not job:
+            time.sleep(10)
+
+threading.Thread(
+    target=crawler_worker,
+    daemon=False
+).start()
 
 # =========================================================
 # CSV HELPER
@@ -257,7 +265,7 @@ def export_output_1():
     )
 
 # =========================================================
-# 📤 EXPORT 2 — SAFE DIVISION
+# 📤 EXPORT 2
 # =========================================================
 @app.get("/export/output-2")
 def export_output_2():
@@ -292,7 +300,7 @@ def export_output_2():
     )
 
 # =========================================================
-# 📤 EXPORT 3 — SAFE DIVISION
+# 📤 EXPORT 3
 # =========================================================
 @app.get("/export/output-3")
 def export_output_3():
