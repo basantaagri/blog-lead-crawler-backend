@@ -62,7 +62,7 @@ def health():
     return {"status": "ok"}
 
 # =========================================================
-# 🧱 CRAWL — ROOT ONLY (LOCKED)
+# 🧱 CRAWL — ROOT ONLY (LOCKED — DO NOT CHANGE)
 # =========================================================
 @app.post("/crawl")
 def crawl_blog(req: CrawlRequest):
@@ -85,7 +85,7 @@ def crawl_blog(req: CrawlRequest):
     return {"status": "ok", "message": "blog queued"}
 
 # =========================================================
-# HISTORY (LAST 30 DAYS)
+# HISTORY — LAST 30 DAYS
 # =========================================================
 @app.get("/history")
 def history():
@@ -132,7 +132,7 @@ def safe_fetch(url: str):
             return None
 
 # =========================================================
-# 🔁 CRAWLER WORKER (FINAL — SKIP ON FAILURE)
+# 🔁 CRAWLER WORKER — FINAL (SKIP ON FAILURE)
 # =========================================================
 def crawler_worker():
     print("🟢 Crawler worker started")
@@ -266,7 +266,8 @@ def csv_stream(rows):
 def export_output_1():
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT
                   bp.blog_url AS blog_root,
                   bp.blog_url AS blog_page_url,
@@ -279,7 +280,8 @@ def export_output_1():
                 JOIN blog_pages bp ON bp.id = ol.blog_page_id
                 JOIN commercial_sites cs USING (commercial_domain)
                 ORDER BY cs.created_at DESC
-            """)
+                """
+            )
             rows = cur.fetchall()
 
     return StreamingResponse(
@@ -295,14 +297,13 @@ def export_output_1():
 def export_output_2():
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT
                   cs.commercial_domain,
                   COUNT(*) AS total_links,
                   COUNT(DISTINCT ol.blog_page_id) AS blogs_count,
-                  ROUND(
-                    100.0 * SUM(ol.is_dofollow::int) / COUNT(*), 2
-                  ) AS dofollow_percent,
+                  ROUND(100.0 * SUM(ol.is_dofollow::int) / COUNT(*), 2) AS dofollow_percent,
                   cs.meta_title,
                   cs.meta_description,
                   cs.is_casino
@@ -313,7 +314,8 @@ def export_output_2():
                   cs.meta_title,
                   cs.meta_description,
                   cs.is_casino
-            """)
+                """
+            )
             rows = cur.fetchall()
 
     return StreamingResponse(
@@ -329,19 +331,19 @@ def export_output_2():
 def export_output_3():
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT
                   bp.blog_url,
                   COUNT(DISTINCT ol.commercial_domain) AS unique_commercial_links,
-                  ROUND(
-                    100.0 * SUM(ol.is_dofollow::int) / COUNT(*), 2
-                  ) AS dofollow_percent,
+                  ROUND(100.0 * SUM(ol.is_dofollow::int) / COUNT(*), 2) AS dofollow_percent,
                   BOOL_OR(cs.is_casino) AS has_casino_links
                 FROM blog_pages bp
                 JOIN outbound_links ol ON bp.id = ol.blog_page_id
                 JOIN commercial_sites cs USING (commercial_domain)
                 GROUP BY bp.blog_url
-            """)
+                """
+            )
             rows = cur.fetchall()
 
     return StreamingResponse(
