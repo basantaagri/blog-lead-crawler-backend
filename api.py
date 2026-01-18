@@ -85,7 +85,7 @@ def crawl_blog(req: CrawlRequest):
     return {"status": "ok", "message": "blog queued"}
 
 # =========================================================
-# HISTORY
+# HISTORY (LAST 30 DAYS LOGIC VIA UI)
 # =========================================================
 @app.get("/history")
 def history():
@@ -95,8 +95,8 @@ def history():
                 """
                 SELECT blog_url, first_crawled, crawl_status
                 FROM blog_pages
+                WHERE first_crawled >= NOW() - INTERVAL '30 days'
                 ORDER BY first_crawled DESC
-                LIMIT 100
                 """
             )
             return cur.fetchall()
@@ -141,9 +141,6 @@ def crawler_worker():
         blog = None
 
         try:
-            # ---------------------------------------------
-            # Pick ONE pending root blog
-            # ---------------------------------------------
             with get_conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
@@ -176,11 +173,7 @@ def crawler_worker():
             blog_url = blog["blog_url"]
             print(f"🔍 Crawling blog: {blog_url}")
 
-            # ---------------------------------------------
-            # Fetch safely
-            # ---------------------------------------------
             resp = safe_fetch(blog_url)
-
             if not resp or resp.status_code != 200:
                 raise Exception("Unreachable or blocked")
 
@@ -225,7 +218,6 @@ def crawler_worker():
                         """,
                         (blog_id,),
                     )
-
                     conn.commit()
 
             print(f"✅ Completed blog: {blog_url}")
@@ -254,54 +246,106 @@ def crawler_worker():
 threading.Thread(target=crawler_worker, daemon=True).start()
 
 # =========================================================
-# CSV CONFIG (LOCKED)
+# CSV HELPER
 # =========================================================
-BLOG_PAGE_LINK_FIELDS = [
-    "blog_page_url",
-    "commercial_url",
-    "commercial_domain",
-    "anchor_text",
-    "is_dofollow",
-    "is_casino",
-    "first_seen",
-]
+def csv_stream(rows):
+    if not rows:
+        return io.StringIO()
 
-def csv_dict_stream(fieldnames, rows):
     buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=fieldnames)
+    writer = csv.DictWriter(buffer, fieldnames=rows[0].keys())
     writer.writeheader()
-    for row in rows:
-        writer.writerow({k: row.get(k) for k in fieldnames})
+    writer.writerows(rows)
     buffer.seek(0)
     return buffer
 
 # =========================================================
-# EXPORT — DB ONLY (UNCHANGED)
+# 📤 EXPORT 1 — BLOG → PAGE → COMMERCIAL LINKS
 # =========================================================
-@app.get("/export/blog-page-links")
-def export_blog_page_links():
+@app.get("/export/output-1")
+def export_output_1():
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
+            cur.execute("""
                 SELECT
-                    bp.blog_url AS blog_page_url,
-                    ol.url AS commercial_url,
-                    ol.commercial_domain,
-                    ol.anchor_text,
-                    ol.is_dofollow,
-                    cs.is_casino,
-                    cs.created_at AS first_seen
+                  bp.blog_url AS blog_root,
+                  bp.blog_url AS blog_page_url,
+                  ol.url AS commercial_url,
+                  ol.commercial_domain,
+                  ol.is_dofollow,
+                  cs.is_casino,
+                  cs.created_at AS first_seen
                 FROM outbound_links ol
                 JOIN blog_pages bp ON bp.id = ol.blog_page_id
-                JOIN commercial_sites cs ON cs.commercial_domain = ol.commercial_domain
+                JOIN commercial_sites cs USING (commercial_domain)
                 ORDER BY cs.created_at DESC
-                """
-            )
+            """)
             rows = cur.fetchall()
 
     return StreamingResponse(
-        csv_dict_stream(BLOG_PAGE_LINK_FIELDS, rows),
+        csv_stream(rows),
         media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=blog_page_links.csv"},
+        headers={"Content-Disposition": "attachment; filename=output_1_blog_page_links.csv"},
+    )
+
+# =========================================================
+# 📤 EXPORT 2 — COMMERCIAL SITE SUMMARY
+# =========================================================
+@app.get("/export/output-2")
+def export_output_2():
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                  cs.commercial_domain,
+                  COUNT(*) AS total_links,
+                  COUNT(DISTINCT ol.blog_page_id) AS blogs_count,
+                  ROUND(
+                    100.0 * SUM(ol.is_dofollow::int) / COUNT(*), 2
+                  ) AS dofollow_percent,
+                  cs.meta_title,
+                  cs.meta_description,
+                  cs.is_casino
+                FROM outbound_links ol
+                JOIN commercial_sites cs USING (commercial_domain)
+                GROUP BY
+                  cs.commercial_domain,
+                  cs.meta_title,
+                  cs.meta_description,
+                  cs.is_casino
+            """)
+            rows = cur.fetchall()
+
+    return StreamingResponse(
+        csv_stream(rows),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=output_2_commercial_summary.csv"},
+    )
+
+# =========================================================
+# 📤 EXPORT 3 — BLOG SUMMARY
+# =========================================================
+@app.get("/export/output-3")
+def export_output_3():
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                  bp.blog_url,
+                  COUNT(DISTINCT ol.commercial_domain) AS unique_commercial_links,
+                  ROUND(
+                    100.0 * SUM(ol.is_dofollow::int) / COUNT(*), 2
+                  ) AS dofollow_percent,
+                  BOOL_OR(cs.is_casino) AS has_casino_links
+                FROM blog_pages bp
+                JOIN outbound_links ol ON bp.id = ol.blog_page_id
+                JOIN commercial_sites cs USING (commercial_domain)
+                GROUP BY bp.blog_url
+            """)
+            rows = cur.fetchall()
+
+    return StreamingResponse(
+        csv_stream(rows),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=output_3_blog_summary.csv"},
     )
