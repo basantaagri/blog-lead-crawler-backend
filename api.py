@@ -25,7 +25,7 @@ app.add_middleware(
 )
 
 # =========================================================
-# DATABASE (POSTGRES)
+# DATABASE (POSTGRES / SUPABASE)
 # =========================================================
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
@@ -53,7 +53,7 @@ def health():
     return {"status": "ok"}
 
 # =========================================================
-# 🧱 CRAWL (ROOT ONLY — SAFE)
+# 🧱 CRAWL (ROOT ONLY — SAFE & STABLE)
 # =========================================================
 @app.post("/crawl")
 def crawl_blog(req: CrawlRequest):
@@ -92,7 +92,7 @@ def history():
             return cur.fetchall()
 
 # =========================================================
-# CSV CONFIG (LOCKED COLUMN ORDER)
+# CSV CONFIG (COLUMN ORDER LOCKED — DO NOT TOUCH)
 # =========================================================
 BLOG_PAGE_LINK_FIELDS = [
     "blog_page_url",
@@ -114,7 +114,7 @@ def csv_dict_stream(fieldnames, rows):
     return buffer
 
 # =========================================================
-# ✅ EXPORT — BLOG PAGE LINKS (SAFE, DB-DRIVEN)
+# EXPORT — BLOG PAGE LINKS (ALL)
 # =========================================================
 @app.get("/export/blog-page-links")
 def export_blog_page_links():
@@ -132,7 +132,8 @@ def export_blog_page_links():
                         cs.is_casino,
                         ol.first_seen
                     FROM outbound_links ol
-                    JOIN blog_pages bp ON bp.id = ol.blog_page_id
+                    JOIN blog_pages bp
+                      ON bp.id = ol.blog_page_id
                     JOIN commercial_sites cs
                       ON cs.commercial_domain = ol.commercial_domain
                     ORDER BY ol.first_seen DESC
@@ -171,7 +172,8 @@ def export_casino_links():
                     cs.is_casino,
                     ol.first_seen
                 FROM outbound_links ol
-                JOIN blog_pages bp ON bp.id = ol.blog_page_id
+                JOIN blog_pages bp
+                  ON bp.id = ol.blog_page_id
                 JOIN commercial_sites cs
                   ON cs.commercial_domain = ol.commercial_domain
                 WHERE cs.is_casino = TRUE
@@ -207,7 +209,8 @@ def export_dofollow_links():
                     cs.is_casino,
                     ol.first_seen
                 FROM outbound_links ol
-                JOIN blog_pages bp ON bp.id = ol.blog_page_id
+                JOIN blog_pages bp
+                  ON bp.id = ol.blog_page_id
                 JOIN commercial_sites cs
                   ON cs.commercial_domain = ol.commercial_domain
                 WHERE ol.is_dofollow = TRUE
