@@ -25,7 +25,7 @@ app.add_middleware(
 )
 
 # =========================================================
-# DATABASE
+# DATABASE (POSTGRES ONLY)
 # =========================================================
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
@@ -53,8 +53,8 @@ def health():
     return {"status": "ok"}
 
 # =========================================================
-# 🧱 CRAWL (RESTORED STABLE BEHAVIOR)
-# - ONLY stores blog root
+# 🧱 CRAWL (ROOT-ONLY, STABLE)
+# - Stores ONLY root blog
 # - NO crawling
 # - NO extraction
 # =========================================================
@@ -95,7 +95,7 @@ def history():
             return cur.fetchall()
 
 # =========================================================
-# CSV HELPER (ORDER LOCKED)
+# CSV CONFIG (COLUMN ORDER LOCKED)
 # =========================================================
 BLOG_PAGE_LINK_FIELDS = [
     "blog_url",
@@ -109,13 +109,13 @@ BLOG_PAGE_LINK_FIELDS = [
 ]
 
 def csv_dict_stream(fieldnames, rows):
-    buf = io.StringIO()
-    writer = csv.DictWriter(buf, fieldnames=fieldnames)
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames)
     writer.writeheader()
     for row in rows:
         writer.writerow({k: row.get(k) for k in fieldnames})
-    buf.seek(0)
-    return buf
+    buffer.seek(0)
+    return buffer
 
 # =========================================================
 # EXPORT — BLOG PAGE LINKS (ALL)
@@ -136,12 +136,15 @@ def export_blog_page_links():
                     cs.is_casino,
                     ol.first_seen
                 FROM outbound_links ol
-                JOIN blog_pages bp ON bp.id = ol.blog_page_id
+                JOIN blog_pages bp
+                  ON bp.id = ol.blog_page_id
                 JOIN blog_pages root
                   ON root.is_root = TRUE
-                 AND bp.blog_url ILIKE '%' || replace(replace(root.blog_url,'https://',''),'http://','') || '%'
-                JOIN commercial_sites cs ON cs.commercial_domain = ol.commercial_domain
-                ORDER BY root.blog_url
+                 AND bp.blog_url ILIKE '%' ||
+                     replace(replace(root.blog_url,'https://',''),'http://','') || '%'
+                JOIN commercial_sites cs
+                  ON cs.commercial_domain = ol.commercial_domain
+                ORDER BY root.blog_url, bp.blog_url
                 """
             )
             rows = cur.fetchall()
@@ -171,13 +174,16 @@ def export_casino_links():
                     cs.is_casino,
                     ol.first_seen
                 FROM outbound_links ol
-                JOIN blog_pages bp ON bp.id = ol.blog_page_id
+                JOIN blog_pages bp
+                  ON bp.id = ol.blog_page_id
                 JOIN blog_pages root
                   ON root.is_root = TRUE
-                 AND bp.blog_url ILIKE '%' || replace(replace(root.blog_url,'https://',''),'http://','') || '%'
-                JOIN commercial_sites cs ON cs.commercial_domain = ol.commercial_domain
+                 AND bp.blog_url ILIKE '%' ||
+                     replace(replace(root.blog_url,'https://',''),'http://','') || '%'
+                JOIN commercial_sites cs
+                  ON cs.commercial_domain = ol.commercial_domain
                 WHERE cs.is_casino = TRUE
-                ORDER BY root.blog_url
+                ORDER BY root.blog_url, bp.blog_url
                 """
             )
             rows = cur.fetchall()
@@ -207,13 +213,16 @@ def export_dofollow_links():
                     cs.is_casino,
                     ol.first_seen
                 FROM outbound_links ol
-                JOIN blog_pages bp ON bp.id = ol.blog_page_id
+                JOIN blog_pages bp
+                  ON bp.id = ol.blog_page_id
                 JOIN blog_pages root
                   ON root.is_root = TRUE
-                 AND bp.blog_url ILIKE '%' || replace(replace(root.blog_url,'https://',''),'http://','') || '%'
-                JOIN commercial_sites cs ON cs.commercial_domain = ol.commercial_domain
+                 AND bp.blog_url ILIKE '%' ||
+                     replace(replace(root.blog_url,'https://',''),'http://','') || '%'
+                JOIN commercial_sites cs
+                  ON cs.commercial_domain = ol.commercial_domain
                 WHERE ol.is_dofollow = TRUE
-                ORDER BY root.blog_url
+                ORDER BY root.blog_url, bp.blog_url
                 """
             )
             rows = cur.fetchall()
