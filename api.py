@@ -4,7 +4,6 @@ load_dotenv()
 import os
 import csv
 import io
-import time
 import requests
 import psycopg2
 
@@ -61,7 +60,7 @@ def health():
     return {"status": "ok"}
 
 # =========================================================
-# 🧱 CRAWL — ROOT ONLY (LOCKED — DO NOT CHANGE)
+# 🧱 CRAWL — ROOT ONLY (LOCKED)
 # =========================================================
 @app.post("/crawl")
 def crawl_blog(req: CrawlRequest):
@@ -105,7 +104,7 @@ def extract_domain(url: str) -> str:
     return url.split("/")[0].strip()
 
 # =========================================================
-# SAFE FETCH (SSL-HARDENED)
+# SAFE FETCH
 # =========================================================
 def safe_fetch(url: str):
     headers = {
@@ -115,7 +114,6 @@ def safe_fetch(url: str):
             "Chrome/121.0.0.0 Safari/537.36"
         )
     }
-
     try:
         return requests.get(url, headers=headers, timeout=15)
     except requests.exceptions.SSLError:
@@ -125,7 +123,7 @@ def safe_fetch(url: str):
             return None
 
 # =========================================================
-# 🔁 REQUEST-BOUND WORKER — SINGLE BLOG ONLY
+# 🔁 REQUEST-BOUND WORKER (SINGLE BLOG)
 # =========================================================
 def crawler_worker_single():
     blog = None
@@ -209,7 +207,7 @@ def crawler_worker_single():
         return {"status": "failed", "blog": blog_url, "error": str(e)}
 
 # =========================================================
-# ▶ RUN WORKER (REQUEST-BOUND — RENDER SAFE)
+# ▶ RUN WORKER (RENDER SAFE)
 # =========================================================
 @app.post("/run-once")
 def run_once():
@@ -230,7 +228,7 @@ def csv_stream(rows):
     return buffer
 
 # =========================================================
-# 📤 EXPORT 1 — BLOG → PAGE → COMMERCIAL LINKS
+# 📤 EXPORT 1
 # =========================================================
 @app.get("/export/output-1")
 def export_output_1():
@@ -259,7 +257,7 @@ def export_output_1():
     )
 
 # =========================================================
-# 📤 EXPORT 2 — COMMERCIAL SITE SUMMARY
+# 📤 EXPORT 2 — SAFE DIVISION
 # =========================================================
 @app.get("/export/output-2")
 def export_output_2():
@@ -270,7 +268,10 @@ def export_output_2():
                   cs.commercial_domain,
                   COUNT(*) AS total_links,
                   COUNT(DISTINCT ol.blog_page_id) AS blogs_count,
-                  ROUND(100.0 * SUM(ol.is_dofollow::int) / COUNT(*), 2) AS dofollow_percent,
+                  ROUND(
+                    100.0 * SUM(ol.is_dofollow::int) / NULLIF(COUNT(*), 0),
+                    2
+                  ) AS dofollow_percent,
                   cs.meta_title,
                   cs.meta_description,
                   cs.is_casino
@@ -291,7 +292,7 @@ def export_output_2():
     )
 
 # =========================================================
-# 📤 EXPORT 3 — BLOG SUMMARY
+# 📤 EXPORT 3 — SAFE DIVISION
 # =========================================================
 @app.get("/export/output-3")
 def export_output_3():
@@ -301,7 +302,10 @@ def export_output_3():
                 SELECT
                   bp.blog_url,
                   COUNT(DISTINCT ol.commercial_domain) AS unique_commercial_links,
-                  ROUND(100.0 * SUM(ol.is_dofollow::int) / COUNT(*), 2) AS dofollow_percent,
+                  ROUND(
+                    100.0 * SUM(ol.is_dofollow::int) / NULLIF(COUNT(*), 0),
+                    2
+                  ) AS dofollow_percent,
                   BOOL_OR(cs.is_casino) AS has_casino_links
                 FROM blog_pages bp
                 JOIN outbound_links ol ON bp.id = ol.blog_page_id
