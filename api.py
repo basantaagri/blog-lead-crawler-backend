@@ -5,7 +5,6 @@ import os
 import csv
 import io
 import time
-import threading
 import requests
 import psycopg2
 
@@ -18,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-print("### BLOG LEAD CRAWLER API v1.3.6 — STABLE + EXPLICIT WORKER ###")
+print("### BLOG LEAD CRAWLER API v1.3.6 — REQUEST-BOUND WORKER (RENDER SAFE) ###")
 
 # =========================================================
 # APP INIT
@@ -72,25 +71,14 @@ def crawl_blog(req: CrawlRequest):
 
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
+            cur.execute("""
                 INSERT INTO blog_pages (blog_url, is_root, crawl_status)
                 VALUES (%s, TRUE, 'pending')
                 ON CONFLICT (blog_url) DO NOTHING
-                """,
-                (blog_url,),
-            )
+            """, (blog_url,))
             conn.commit()
 
     return {"status": "ok", "message": "blog queued"}
-
-# =========================================================
-# ▶ RUN WORKER (EXPLICIT — REQUIRED FOR RENDER)
-# =========================================================
-@app.post("/run-worker")
-def run_worker():
-    threading.Thread(target=crawler_worker, daemon=True).start()
-    return {"status": "worker started"}
 
 # =========================================================
 # HISTORY — LAST 30 DAYS
@@ -99,14 +87,12 @@ def run_worker():
 def history():
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
+            cur.execute("""
                 SELECT blog_url, first_crawled, crawl_status
                 FROM blog_pages
                 WHERE first_crawled >= NOW() - INTERVAL '30 days'
                 ORDER BY first_crawled DESC
-                """
-            )
+            """)
             return cur.fetchall()
 
 # =========================================================
@@ -134,119 +120,100 @@ def safe_fetch(url: str):
         return requests.get(url, headers=headers, timeout=15)
     except requests.exceptions.SSLError:
         try:
-            http_url = url.replace("https://", "http://", 1)
-            return requests.get(http_url, headers=headers, timeout=15)
+            return requests.get(url.replace("https://", "http://", 1), headers=headers, timeout=15)
         except Exception:
             return None
 
 # =========================================================
-# 🔁 CRAWLER WORKER — FINAL (SKIP ON FAILURE)
+# 🔁 REQUEST-BOUND WORKER — SINGLE BLOG ONLY
 # =========================================================
-def crawler_worker():
-    print("🟢 Crawler worker started")
+def crawler_worker_single():
+    blog = None
 
-    while True:
-        blog = None
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, blog_url
+                FROM blog_pages
+                WHERE is_root = TRUE
+                  AND crawl_status = 'pending'
+                ORDER BY first_crawled ASC
+                LIMIT 1
+            """)
+            blog = cur.fetchone()
 
-        try:
-            with get_conn() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        SELECT id, blog_url
-                        FROM blog_pages
-                        WHERE is_root = TRUE
-                          AND crawl_status = 'pending'
-                        ORDER BY first_crawled ASC
-                        LIMIT 1
-                        """
-                    )
-                    blog = cur.fetchone()
+            if not blog:
+                return {"status": "no pending blogs"}
 
-                    if not blog:
-                        time.sleep(5)
+            cur.execute("""
+                UPDATE blog_pages
+                SET crawl_status = 'in_progress'
+                WHERE id = %s
+            """, (blog["id"],))
+            conn.commit()
+
+    blog_id = blog["id"]
+    blog_url = blog["blog_url"]
+    print(f"🔍 Crawling blog: {blog_url}")
+
+    try:
+        resp = safe_fetch(blog_url)
+        if not resp or resp.status_code != 200:
+            raise Exception("Unreachable")
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        links = soup.find_all("a", href=True)
+
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                for a in links:
+                    href = a.get("href", "").strip()
+                    if not href or href.startswith("#"):
                         continue
 
-                    cur.execute(
-                        """
-                        UPDATE blog_pages
-                        SET crawl_status = 'in_progress'
-                        WHERE id = %s
-                        """,
-                        (blog["id"],),
-                    )
-                    conn.commit()
+                    full_url = urljoin(blog_url, href)
+                    domain = extract_domain(full_url)
+                    anchor = a.get_text(strip=True)[:255]
 
-            blog_id = blog["id"]
-            blog_url = blog["blog_url"]
-            print(f"🔍 Crawling blog: {blog_url}")
+                    cur.execute("""
+                        INSERT INTO outbound_links
+                        (blog_page_id, url, commercial_domain, anchor_text, is_dofollow)
+                        VALUES (%s, %s, %s, %s, TRUE)
+                        ON CONFLICT DO NOTHING
+                    """, (blog_id, full_url, domain, anchor))
 
-            resp = safe_fetch(blog_url)
-            if not resp or resp.status_code != 200:
-                raise Exception("Unreachable or blocked")
+                    cur.execute("""
+                        INSERT INTO commercial_sites (commercial_domain)
+                        VALUES (%s)
+                        ON CONFLICT (commercial_domain) DO NOTHING
+                    """, (domain,))
 
-            soup = BeautifulSoup(resp.text, "html.parser")
-            links = soup.find_all("a", href=True)
+                cur.execute("""
+                    UPDATE blog_pages
+                    SET crawl_status = 'done'
+                    WHERE id = %s
+                """, (blog_id,))
+                conn.commit()
 
-            with get_conn() as conn:
-                with conn.cursor() as cur:
-                    for a in links:
-                        href = a.get("href", "").strip()
-                        if not href or href.startswith("#"):
-                            continue
+        return {"status": "completed", "blog": blog_url}
 
-                        full_url = urljoin(blog_url, href)
-                        domain = extract_domain(full_url)
-                        anchor = a.get_text(strip=True)[:255]
+    except Exception as e:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE blog_pages
+                    SET crawl_status = 'failed'
+                    WHERE id = %s
+                """, (blog_id,))
+                conn.commit()
+        return {"status": "failed", "blog": blog_url, "error": str(e)}
 
-                        cur.execute(
-                            """
-                            INSERT INTO outbound_links
-                            (blog_page_id, url, commercial_domain, anchor_text, is_dofollow)
-                            VALUES (%s, %s, %s, %s, TRUE)
-                            ON CONFLICT DO NOTHING
-                            """,
-                            (blog_id, full_url, domain, anchor),
-                        )
-
-                        cur.execute(
-                            """
-                            INSERT INTO commercial_sites (commercial_domain)
-                            VALUES (%s)
-                            ON CONFLICT (commercial_domain) DO NOTHING
-                            """,
-                            (domain,),
-                        )
-
-                    cur.execute(
-                        """
-                        UPDATE blog_pages
-                        SET crawl_status = 'done'
-                        WHERE id = %s
-                        """,
-                        (blog_id,),
-                    )
-                    conn.commit()
-
-            print(f"✅ Completed blog: {blog_url}")
-
-        except Exception as e:
-            print(f"❌ Failed blog — skipped permanently: {blog_url} | {e}")
-
-            if blog:
-                with get_conn() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            """
-                            UPDATE blog_pages
-                            SET crawl_status = 'failed'
-                            WHERE id = %s
-                            """,
-                            (blog["id"],),
-                        )
-                        conn.commit()
-
-            time.sleep(3)
+# =========================================================
+# ▶ RUN WORKER (REQUEST-BOUND — RENDER SAFE)
+# =========================================================
+@app.post("/run-once")
+def run_once():
+    return crawler_worker_single()
 
 # =========================================================
 # CSV HELPER
@@ -269,8 +236,7 @@ def csv_stream(rows):
 def export_output_1():
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
+            cur.execute("""
                 SELECT
                   bp.blog_url AS blog_root,
                   bp.blog_url AS blog_page_url,
@@ -283,8 +249,7 @@ def export_output_1():
                 JOIN blog_pages bp ON bp.id = ol.blog_page_id
                 JOIN commercial_sites cs USING (commercial_domain)
                 ORDER BY cs.created_at DESC
-                """
-            )
+            """)
             rows = cur.fetchall()
 
     return StreamingResponse(
@@ -300,8 +265,7 @@ def export_output_1():
 def export_output_2():
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
+            cur.execute("""
                 SELECT
                   cs.commercial_domain,
                   COUNT(*) AS total_links,
@@ -317,8 +281,7 @@ def export_output_2():
                   cs.meta_title,
                   cs.meta_description,
                   cs.is_casino
-                """
-            )
+            """)
             rows = cur.fetchall()
 
     return StreamingResponse(
@@ -334,8 +297,7 @@ def export_output_2():
 def export_output_3():
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
+            cur.execute("""
                 SELECT
                   bp.blog_url,
                   COUNT(DISTINCT ol.commercial_domain) AS unique_commercial_links,
@@ -345,8 +307,7 @@ def export_output_3():
                 JOIN outbound_links ol ON bp.id = ol.blog_page_id
                 JOIN commercial_sites cs USING (commercial_domain)
                 GROUP BY bp.blog_url
-                """
-            )
+            """)
             rows = cur.fetchall()
 
     return StreamingResponse(
