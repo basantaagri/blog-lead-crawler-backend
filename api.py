@@ -9,7 +9,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import os, csv, io
 
-print("### BLOG LEAD CRAWLER API v1.3.6 — STABLE (DB-DRIVEN) ###")
+print("### BLOG LEAD CRAWLER API v1.3.6 — STABLE (DB-DRIVEN EXPORTS) ###")
 
 # =========================================================
 # APP INIT
@@ -25,7 +25,7 @@ app.add_middleware(
 )
 
 # =========================================================
-# DATABASE (POSTGRES ONLY)
+# DATABASE (POSTGRES)
 # =========================================================
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
@@ -35,7 +35,7 @@ def get_conn():
     return psycopg2.connect(
         DATABASE_URL,
         cursor_factory=RealDictCursor,
-        sslmode="require"
+        sslmode="require",
     )
 
 # =========================================================
@@ -53,10 +53,7 @@ def health():
     return {"status": "ok"}
 
 # =========================================================
-# 🧱 CRAWL (ROOT-ONLY, STABLE)
-# - Stores ONLY root blog
-# - NO crawling
-# - NO extraction
+# 🧱 CRAWL (ROOT ONLY — SAFE)
 # =========================================================
 @app.post("/crawl")
 def crawl_blog(req: CrawlRequest):
@@ -95,10 +92,9 @@ def history():
             return cur.fetchall()
 
 # =========================================================
-# CSV CONFIG (COLUMN ORDER LOCKED)
+# CSV CONFIG (LOCKED COLUMN ORDER)
 # =========================================================
 BLOG_PAGE_LINK_FIELDS = [
-    "blog_url",
     "blog_page_url",
     "commercial_url",
     "commercial_domain",
@@ -118,42 +114,44 @@ def csv_dict_stream(fieldnames, rows):
     return buffer
 
 # =========================================================
-# EXPORT — BLOG PAGE LINKS (ALL)
+# ✅ EXPORT — BLOG PAGE LINKS (SAFE, DB-DRIVEN)
 # =========================================================
 @app.get("/export/blog-page-links")
 def export_blog_page_links():
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT
-                    root.blog_url,
-                    bp.blog_url AS blog_page_url,
-                    ol.url AS commercial_url,
-                    ol.commercial_domain,
-                    ol.anchor_text,
-                    ol.is_dofollow,
-                    cs.is_casino,
-                    ol.first_seen
-                FROM outbound_links ol
-                JOIN blog_pages bp
-                  ON bp.id = ol.blog_page_id
-                JOIN blog_pages root
-                  ON root.is_root = TRUE
-                 AND bp.blog_url ILIKE '%' ||
-                     replace(replace(root.blog_url,'https://',''),'http://','') || '%'
-                JOIN commercial_sites cs
-                  ON cs.commercial_domain = ol.commercial_domain
-                ORDER BY root.blog_url, bp.blog_url
-                """
-            )
-            rows = cur.fetchall()
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        bp.blog_url      AS blog_page_url,
+                        ol.url           AS commercial_url,
+                        ol.commercial_domain,
+                        ol.anchor_text,
+                        ol.is_dofollow,
+                        cs.is_casino,
+                        ol.first_seen
+                    FROM outbound_links ol
+                    JOIN blog_pages bp ON bp.id = ol.blog_page_id
+                    JOIN commercial_sites cs
+                      ON cs.commercial_domain = ol.commercial_domain
+                    ORDER BY ol.first_seen DESC
+                    """
+                )
+                rows = cur.fetchall()
 
-    return StreamingResponse(
-        csv_dict_stream(BLOG_PAGE_LINK_FIELDS, rows),
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=blog_page_links.csv"},
-    )
+        return StreamingResponse(
+            csv_dict_stream(BLOG_PAGE_LINK_FIELDS, rows),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition":
+                "attachment; filename=blog_page_links.csv"
+            },
+        )
+
+    except Exception as e:
+        print("EXPORT ERROR:", e)
+        raise HTTPException(500, "Export failed")
 
 # =========================================================
 # EXPORT — CASINO ONLY
@@ -165,25 +163,19 @@ def export_casino_links():
             cur.execute(
                 """
                 SELECT
-                    root.blog_url,
-                    bp.blog_url AS blog_page_url,
-                    ol.url AS commercial_url,
+                    bp.blog_url      AS blog_page_url,
+                    ol.url           AS commercial_url,
                     ol.commercial_domain,
                     ol.anchor_text,
                     ol.is_dofollow,
                     cs.is_casino,
                     ol.first_seen
                 FROM outbound_links ol
-                JOIN blog_pages bp
-                  ON bp.id = ol.blog_page_id
-                JOIN blog_pages root
-                  ON root.is_root = TRUE
-                 AND bp.blog_url ILIKE '%' ||
-                     replace(replace(root.blog_url,'https://',''),'http://','') || '%'
+                JOIN blog_pages bp ON bp.id = ol.blog_page_id
                 JOIN commercial_sites cs
                   ON cs.commercial_domain = ol.commercial_domain
                 WHERE cs.is_casino = TRUE
-                ORDER BY root.blog_url, bp.blog_url
+                ORDER BY ol.first_seen DESC
                 """
             )
             rows = cur.fetchall()
@@ -191,7 +183,10 @@ def export_casino_links():
     return StreamingResponse(
         csv_dict_stream(BLOG_PAGE_LINK_FIELDS, rows),
         media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=casino_links.csv"},
+        headers={
+            "Content-Disposition":
+            "attachment; filename=casino_links.csv"
+        },
     )
 
 # =========================================================
@@ -204,25 +199,19 @@ def export_dofollow_links():
             cur.execute(
                 """
                 SELECT
-                    root.blog_url,
-                    bp.blog_url AS blog_page_url,
-                    ol.url AS commercial_url,
+                    bp.blog_url      AS blog_page_url,
+                    ol.url           AS commercial_url,
                     ol.commercial_domain,
                     ol.anchor_text,
                     ol.is_dofollow,
                     cs.is_casino,
                     ol.first_seen
                 FROM outbound_links ol
-                JOIN blog_pages bp
-                  ON bp.id = ol.blog_page_id
-                JOIN blog_pages root
-                  ON root.is_root = TRUE
-                 AND bp.blog_url ILIKE '%' ||
-                     replace(replace(root.blog_url,'https://',''),'http://','') || '%'
+                JOIN blog_pages bp ON bp.id = ol.blog_page_id
                 JOIN commercial_sites cs
                   ON cs.commercial_domain = ol.commercial_domain
                 WHERE ol.is_dofollow = TRUE
-                ORDER BY root.blog_url, bp.blog_url
+                ORDER BY ol.first_seen DESC
                 """
             )
             rows = cur.fetchall()
@@ -230,5 +219,8 @@ def export_dofollow_links():
     return StreamingResponse(
         csv_dict_stream(BLOG_PAGE_LINK_FIELDS, rows),
         media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=dofollow_links.csv"},
+        headers={
+            "Content-Disposition":
+            "attachment; filename=dofollow_links.csv"
+        },
     )
