@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-print("### BLOG LEAD CRAWLER API v1.3.6 — STABLE + WORKER + SKIP-ON-FAILURE ###")
+print("### BLOG LEAD CRAWLER API v1.3.6 — STABLE + EXPLICIT WORKER ###")
 
 # =========================================================
 # APP INIT
@@ -83,6 +83,14 @@ def crawl_blog(req: CrawlRequest):
             conn.commit()
 
     return {"status": "ok", "message": "blog queued"}
+
+# =========================================================
+# ▶ RUN WORKER (EXPLICIT — REQUIRED FOR RENDER)
+# =========================================================
+@app.post("/run-worker")
+def run_worker():
+    threading.Thread(target=crawler_worker, daemon=True).start()
+    return {"status": "worker started"}
 
 # =========================================================
 # HISTORY — LAST 30 DAYS
@@ -239,11 +247,6 @@ def crawler_worker():
                         conn.commit()
 
             time.sleep(3)
-
-# =========================================================
-# START WORKER THREAD
-# =========================================================
-threading.Thread(target=crawler_worker, daemon=True).start()
 
 # =========================================================
 # CSV HELPER
