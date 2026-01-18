@@ -6,8 +6,8 @@ import csv
 import io
 import time
 import threading
-import psycopg2
 import requests
+import psycopg2
 
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-print("### BLOG LEAD CRAWLER API v1.3.6 — STABLE + WORKER + SKIP ON FAILURE ###")
+print("### BLOG LEAD CRAWLER API v1.3.6 — STABLE + WORKER + SKIP-ON-FAILURE ###")
 
 # =========================================================
 # APP INIT
@@ -74,8 +74,8 @@ def crawl_blog(req: CrawlRequest):
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO blog_pages (blog_url, is_root)
-                VALUES (%s, TRUE)
+                INSERT INTO blog_pages (blog_url, is_root, crawl_status)
+                VALUES (%s, TRUE, 'pending')
                 ON CONFLICT (blog_url) DO NOTHING
                 """,
                 (blog_url,),
@@ -93,7 +93,7 @@ def history():
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT blog_url, first_crawled, is_root
+                SELECT blog_url, first_crawled, crawl_status
                 FROM blog_pages
                 ORDER BY first_crawled DESC
                 LIMIT 100
@@ -111,7 +111,7 @@ def extract_domain(url: str) -> str:
     return url.split("/")[0].strip()
 
 # =========================================================
-# SAFE FETCH (SSL HARDENED)
+# SAFE FETCH (SSL-HARDENED)
 # =========================================================
 def safe_fetch(url: str):
     headers = {
@@ -132,16 +132,18 @@ def safe_fetch(url: str):
             return None
 
 # =========================================================
-# 🔁 CRAWLER WORKER (SKIP-ON-FAILURE)
+# 🔁 CRAWLER WORKER (FINAL — SKIP ON FAILURE)
 # =========================================================
 def crawler_worker():
     print("🟢 Crawler worker started")
 
     while True:
+        blog = None
+
         try:
-            # -------------------------------------------------
-            # Pick ONE uncrawled root blog
-            # -------------------------------------------------
+            # ---------------------------------------------
+            # Pick ONE pending root blog
+            # ---------------------------------------------
             with get_conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
@@ -149,26 +151,34 @@ def crawler_worker():
                         SELECT id, blog_url
                         FROM blog_pages
                         WHERE is_root = TRUE
-                          AND id NOT IN (
-                              SELECT DISTINCT blog_page_id FROM outbound_links
-                          )
+                          AND crawl_status = 'pending'
                         ORDER BY first_crawled ASC
                         LIMIT 1
                         """
                     )
                     blog = cur.fetchone()
 
-            if not blog:
-                time.sleep(5)
-                continue
+                    if not blog:
+                        time.sleep(5)
+                        continue
+
+                    cur.execute(
+                        """
+                        UPDATE blog_pages
+                        SET crawl_status = 'in_progress'
+                        WHERE id = %s
+                        """,
+                        (blog["id"],),
+                    )
+                    conn.commit()
 
             blog_id = blog["id"]
             blog_url = blog["blog_url"]
             print(f"🔍 Crawling blog: {blog_url}")
 
-            # -------------------------------------------------
-            # Fetch blog safely
-            # -------------------------------------------------
+            # ---------------------------------------------
+            # Fetch safely
+            # ---------------------------------------------
             resp = safe_fetch(blog_url)
 
             if not resp or resp.status_code != 200:
@@ -207,25 +217,34 @@ def crawler_worker():
                             (domain,),
                         )
 
-                conn.commit()
-
-            print(f"✅ Completed blog: {blog_url}")
-
-        except Exception as e:
-            print(f"❌ Failed blog, skipping permanently: {blog_url} | {e}")
-
-            # 🔒 SKIP-ON-FAILURE PATCH (THE FIX)
-            with get_conn() as conn:
-                with conn.cursor() as cur:
                     cur.execute(
                         """
                         UPDATE blog_pages
-                        SET is_root = FALSE
+                        SET crawl_status = 'done'
                         WHERE id = %s
                         """,
                         (blog_id,),
                     )
+
                     conn.commit()
+
+            print(f"✅ Completed blog: {blog_url}")
+
+        except Exception as e:
+            print(f"❌ Failed blog — skipped permanently: {blog_url} | {e}")
+
+            if blog:
+                with get_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            UPDATE blog_pages
+                            SET crawl_status = 'failed'
+                            WHERE id = %s
+                            """,
+                            (blog["id"],),
+                        )
+                        conn.commit()
 
             time.sleep(3)
 
@@ -257,7 +276,7 @@ def csv_dict_stream(fieldnames, rows):
     return buffer
 
 # =========================================================
-# EXPORTS (DB-ONLY — UNCHANGED)
+# EXPORT — DB ONLY (UNCHANGED)
 # =========================================================
 @app.get("/export/blog-page-links")
 def export_blog_page_links():
