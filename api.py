@@ -85,7 +85,7 @@ def crawl_blog(req: CrawlRequest):
     return {"status": "ok", "message": "blog queued"}
 
 # =========================================================
-# HISTORY (LAST 30 DAYS LOGIC VIA UI)
+# HISTORY (LAST 30 DAYS)
 # =========================================================
 @app.get("/history")
 def history():
