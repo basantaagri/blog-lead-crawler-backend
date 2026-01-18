@@ -1,7 +1,7 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -9,7 +9,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import os, csv, io
 
-print("### BLOG LEAD CRAWLER API v1.3.6 — STABLE + AUTO EXTRACT RESTORED ###")
+print("### BLOG LEAD CRAWLER API v1.3.6 — STABLE (DB-DRIVEN) ###")
 
 # =========================================================
 # APP INIT
@@ -32,7 +32,11 @@ if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL not set")
 
 def get_conn():
-    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+    return psycopg2.connect(
+        DATABASE_URL,
+        cursor_factory=RealDictCursor,
+        sslmode="require"
+    )
 
 # =========================================================
 # MODELS
@@ -49,35 +53,30 @@ def health():
     return {"status": "ok"}
 
 # =========================================================
-# 🚀 ONE-FLOW CRAWL (OLD BEHAVIOR RESTORED)
+# 🧱 CRAWL (RESTORED STABLE BEHAVIOR)
+# - ONLY stores blog root
+# - NO crawling
+# - NO extraction
 # =========================================================
 @app.post("/crawl")
 def crawl_blog(req: CrawlRequest):
-    blog_url = req.blog_url.strip()
+    blog_url = req.blog_url.strip().rstrip("/")
     if not blog_url:
         raise HTTPException(400, "blog_url required")
 
-    # save root blog
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO blog_pages (blog_url, is_root)
-                VALUES (%s, true)
+                VALUES (%s, TRUE)
                 ON CONFLICT (blog_url) DO NOTHING
                 """,
                 (blog_url,),
             )
             conn.commit()
 
-    # 🔥 AUTO extraction (old behavior)
-    try:
-        from services.orchestrator import CrawlOrchestrator
-        CrawlOrchestrator().run_for_blog(blog_url)
-    except Exception as e:
-        print("AUTO EXTRACT ERROR:", e)
-
-    return {"status": "ok", "message": "crawl + extraction complete"}
+    return {"status": "ok", "message": "blog stored"}
 
 # =========================================================
 # HISTORY
@@ -96,35 +95,131 @@ def history():
             return cur.fetchall()
 
 # =========================================================
-# EXPORTS
+# CSV HELPER (ORDER LOCKED)
 # =========================================================
-def csv_stream(headers, rows):
+BLOG_PAGE_LINK_FIELDS = [
+    "blog_url",
+    "blog_page_url",
+    "commercial_url",
+    "commercial_domain",
+    "anchor_text",
+    "is_dofollow",
+    "is_casino",
+    "first_seen",
+]
+
+def csv_dict_stream(fieldnames, rows):
     buf = io.StringIO()
-    w = csv.writer(buf)
-    w.writerow(headers)
-    for r in rows:
-        w.writerow(r)
+    writer = csv.DictWriter(buf, fieldnames=fieldnames)
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({k: row.get(k) for k in fieldnames})
     buf.seek(0)
     return buf
 
+# =========================================================
+# EXPORT — BLOG PAGE LINKS (ALL)
+# =========================================================
 @app.get("/export/blog-page-links")
 def export_blog_page_links():
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT bp.blog_url, ol.url, ol.is_dofollow, cs.is_casino
+                SELECT
+                    root.blog_url,
+                    bp.blog_url AS blog_page_url,
+                    ol.url AS commercial_url,
+                    ol.commercial_domain,
+                    ol.anchor_text,
+                    ol.is_dofollow,
+                    cs.is_casino,
+                    ol.first_seen
                 FROM outbound_links ol
                 JOIN blog_pages bp ON bp.id = ol.blog_page_id
+                JOIN blog_pages root
+                  ON root.is_root = TRUE
+                 AND bp.blog_url ILIKE '%' || replace(replace(root.blog_url,'https://',''),'http://','') || '%'
                 JOIN commercial_sites cs ON cs.commercial_domain = ol.commercial_domain
+                ORDER BY root.blog_url
                 """
             )
             rows = cur.fetchall()
 
     return StreamingResponse(
-        csv_stream(
-            ["blog_url", "outbound_url", "dofollow", "casino"],
-            [(r["blog_url"], r["url"], r["is_dofollow"], r["is_casino"]) for r in rows],
-        ),
+        csv_dict_stream(BLOG_PAGE_LINK_FIELDS, rows),
         media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=blog_page_links.csv"},
+    )
+
+# =========================================================
+# EXPORT — CASINO ONLY
+# =========================================================
+@app.get("/export/blog-page-links/casino-only")
+def export_casino_links():
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    root.blog_url,
+                    bp.blog_url AS blog_page_url,
+                    ol.url AS commercial_url,
+                    ol.commercial_domain,
+                    ol.anchor_text,
+                    ol.is_dofollow,
+                    cs.is_casino,
+                    ol.first_seen
+                FROM outbound_links ol
+                JOIN blog_pages bp ON bp.id = ol.blog_page_id
+                JOIN blog_pages root
+                  ON root.is_root = TRUE
+                 AND bp.blog_url ILIKE '%' || replace(replace(root.blog_url,'https://',''),'http://','') || '%'
+                JOIN commercial_sites cs ON cs.commercial_domain = ol.commercial_domain
+                WHERE cs.is_casino = TRUE
+                ORDER BY root.blog_url
+                """
+            )
+            rows = cur.fetchall()
+
+    return StreamingResponse(
+        csv_dict_stream(BLOG_PAGE_LINK_FIELDS, rows),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=casino_links.csv"},
+    )
+
+# =========================================================
+# EXPORT — DOFOLLOW ONLY
+# =========================================================
+@app.get("/export/blog-page-links/dofollow-only")
+def export_dofollow_links():
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    root.blog_url,
+                    bp.blog_url AS blog_page_url,
+                    ol.url AS commercial_url,
+                    ol.commercial_domain,
+                    ol.anchor_text,
+                    ol.is_dofollow,
+                    cs.is_casino,
+                    ol.first_seen
+                FROM outbound_links ol
+                JOIN blog_pages bp ON bp.id = ol.blog_page_id
+                JOIN blog_pages root
+                  ON root.is_root = TRUE
+                 AND bp.blog_url ILIKE '%' || replace(replace(root.blog_url,'https://',''),'http://','') || '%'
+                JOIN commercial_sites cs ON cs.commercial_domain = ol.commercial_domain
+                WHERE ol.is_dofollow = TRUE
+                ORDER BY root.blog_url
+                """
+            )
+            rows = cur.fetchall()
+
+    return StreamingResponse(
+        csv_dict_stream(BLOG_PAGE_LINK_FIELDS, rows),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=dofollow_links.csv"},
     )
