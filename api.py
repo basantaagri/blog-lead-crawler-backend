@@ -21,6 +21,11 @@ from pydantic import BaseModel
 print("### BLOG LEAD CRAWLER API v1.3.6 — LONG-LIVED WORKER (LOCAL/VPS ONLY) ###")
 
 # =========================================================
+# 🔑 WORKER FLAG (ONLY NEW LINE)
+# =========================================================
+RUN_WORKER = os.getenv("RUN_WORKER", "true").lower() == "true"
+
+# =========================================================
 # APP INIT
 # =========================================================
 app = FastAPI(title="Blog Lead Crawler API", version="1.3.6")
@@ -47,7 +52,7 @@ def get_conn():
         sslmode="require",
     )
 
-# 🔒 GLOBAL DB LOCK (CRITICAL FIX)
+# 🔒 GLOBAL DB LOCK (UNCHANGED)
 DB_LOCK = threading.Lock()
 
 # =========================================================
@@ -65,7 +70,7 @@ def health():
     return {"status": "ok"}
 
 # =========================================================
-# 🧱 CRAWL — ROOT ONLY (LOCKED)
+# 🧱 CRAWL — ROOT ONLY
 # =========================================================
 @app.post("/crawl")
 def crawl_blog(req: CrawlRequest):
@@ -130,7 +135,7 @@ def safe_fetch(url: str):
             return None
 
 # =========================================================
-# 🔁 CORE CRAWLER
+# 🔁 CORE CRAWLER (UNCHANGED)
 # =========================================================
 def crawler_worker_single():
     with DB_LOCK:
@@ -222,10 +227,12 @@ def crawler_worker():
         if not job:
             time.sleep(10)
 
-threading.Thread(
-    target=crawler_worker,
-    daemon=False
-).start()
+# ✅ ONLY CHANGE HERE
+if RUN_WORKER:
+    threading.Thread(
+        target=crawler_worker,
+        daemon=False
+    ).start()
 
 # =========================================================
 # CSV HELPER
@@ -242,7 +249,7 @@ def csv_stream(rows):
     return buffer
 
 # =========================================================
-# 📤 EXPORTS (LOCKED)
+# 📤 EXPORTS
 # =========================================================
 @app.get("/export/output-1")
 def export_output_1():
