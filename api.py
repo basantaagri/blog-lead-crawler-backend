@@ -69,17 +69,17 @@ def health():
     return {"status": "ok"}
 
 # =========================================================
-# 🔒 URL VALIDATION (NEW — ONLY ADDITION)
+# 🔒 URL VALIDATION (ONLY REQUIRED ADDITION)
 # =========================================================
 def is_valid_url(url: str) -> bool:
     try:
-        parsed = urlparse(url)
-        return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+        p = urlparse(url)
+        return p.scheme in ("http", "https") and bool(p.netloc)
     except Exception:
         return False
 
 # =========================================================
-# 🧱 CRAWL — ROOT ONLY (MINIMAL CHANGE)
+# 🧱 CRAWL — ROOT ONLY (SAFE)
 # =========================================================
 @app.post("/crawl")
 def crawl_blog(req: CrawlRequest):
@@ -88,7 +88,6 @@ def crawl_blog(req: CrawlRequest):
     if not blog_url:
         raise HTTPException(400, "blog_url required")
 
-    # ✅ NEW HARD BLOCK — PREVENT QUEUE POLLUTION
     if not is_valid_url(blog_url):
         raise HTTPException(400, "Invalid blog_url")
 
@@ -242,19 +241,19 @@ def crawler_worker():
             time.sleep(10)
 
 if RUN_WORKER:
-    threading.Thread(
-        target=crawler_worker,
-        daemon=False
-    ).start()
+    threading.Thread(target=crawler_worker, daemon=False).start()
 
 # =========================================================
-# CSV HELPER (UNCHANGED)
+# CSV HELPER (FIXED — NO INTERNAL ERROR)
 # =========================================================
 def csv_stream(rows):
-    if not rows:
-        return io.StringIO()
-
     buffer = io.StringIO()
+
+    if not rows:
+        buffer.write("")
+        buffer.seek(0)
+        return buffer
+
     writer = csv.DictWriter(buffer, fieldnames=rows[0].keys())
     writer.writeheader()
     writer.writerows(rows)
@@ -262,7 +261,7 @@ def csv_stream(rows):
     return buffer
 
 # =========================================================
-# 📤 EXPORTS (UNCHANGED)
+# 📤 EXPORTS
 # =========================================================
 @app.get("/export/output-1")
 def export_output_1():
@@ -334,14 +333,17 @@ def export_output_3():
                       bp.blog_url,
                       COUNT(DISTINCT ol.commercial_domain) AS unique_commercial_links,
                       ROUND(
-                        100.0 * SUM(ol.is_dofollow::int) / NULLIF(COUNT(*), 0),
+                        100.0 * SUM(CASE WHEN ol.is_dofollow THEN 1 ELSE 0 END)
+                        / NULLIF(COUNT(ol.id), 0),
                         2
                       ) AS dofollow_percent,
-                      BOOL_OR(cs.is_casino) AS has_casino_links
+                      COALESCE(BOOL_OR(cs.is_casino), FALSE) AS has_casino_links
                     FROM blog_pages bp
-                    JOIN outbound_links ol ON bp.id = ol.blog_page_id
-                    JOIN commercial_sites cs ON cs.commercial_domain = ol.commercial_domain
+                    LEFT JOIN outbound_links ol ON bp.id = ol.blog_page_id
+                    LEFT JOIN commercial_sites cs ON cs.commercial_domain = ol.commercial_domain
+                    WHERE bp.is_root = TRUE
                     GROUP BY bp.blog_url
+                    ORDER BY bp.blog_url
                 """)
                 rows = cur.fetchall()
 
