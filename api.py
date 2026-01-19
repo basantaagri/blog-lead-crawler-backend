@@ -9,7 +9,7 @@ import psycopg2
 import threading
 import time
 
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 from psycopg2.extras import RealDictCursor
 
@@ -21,7 +21,7 @@ from pydantic import BaseModel
 print("### BLOG LEAD CRAWLER API v1.3.6 — LONG-LIVED WORKER (LOCAL/VPS ONLY) ###")
 
 # =========================================================
-# 🔑 WORKER FLAG (ONLY NEW LINE)
+# 🔑 WORKER FLAG (UNCHANGED)
 # =========================================================
 RUN_WORKER = os.getenv("RUN_WORKER", "true").lower() == "true"
 
@@ -52,7 +52,6 @@ def get_conn():
         sslmode="require",
     )
 
-# 🔒 GLOBAL DB LOCK (UNCHANGED)
 DB_LOCK = threading.Lock()
 
 # =========================================================
@@ -70,13 +69,28 @@ def health():
     return {"status": "ok"}
 
 # =========================================================
-# 🧱 CRAWL — ROOT ONLY
+# 🔒 URL VALIDATION (NEW — ONLY ADDITION)
+# =========================================================
+def is_valid_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+    except Exception:
+        return False
+
+# =========================================================
+# 🧱 CRAWL — ROOT ONLY (MINIMAL CHANGE)
 # =========================================================
 @app.post("/crawl")
 def crawl_blog(req: CrawlRequest):
     blog_url = req.blog_url.strip().rstrip("/")
+
     if not blog_url:
         raise HTTPException(400, "blog_url required")
+
+    # ✅ NEW HARD BLOCK — PREVENT QUEUE POLLUTION
+    if not is_valid_url(blog_url):
+        raise HTTPException(400, "Invalid blog_url")
 
     with DB_LOCK:
         with get_conn() as conn:
@@ -91,7 +105,7 @@ def crawl_blog(req: CrawlRequest):
     return {"status": "ok", "message": "blog queued"}
 
 # =========================================================
-# HISTORY
+# HISTORY (UNCHANGED)
 # =========================================================
 @app.get("/history")
 def history():
@@ -107,7 +121,7 @@ def history():
                 return cur.fetchall()
 
 # =========================================================
-# DOMAIN NORMALIZATION
+# DOMAIN NORMALIZATION (UNCHANGED)
 # =========================================================
 def extract_domain(url: str) -> str:
     url = url.replace("https://", "").replace("http://", "")
@@ -116,7 +130,7 @@ def extract_domain(url: str) -> str:
     return url.split("/")[0].strip()
 
 # =========================================================
-# SAFE FETCH
+# SAFE FETCH (UNCHANGED)
 # =========================================================
 def safe_fetch(url: str):
     headers = {
@@ -218,7 +232,7 @@ def crawler_worker_single():
         print(f"❌ Failed blog {blog_url}: {e}")
 
 # =========================================================
-# ♾️ WORKER LOOP
+# ♾️ WORKER LOOP (UNCHANGED)
 # =========================================================
 def crawler_worker():
     print("### LONG-LIVED CRAWLER WORKER STARTED ###")
@@ -227,7 +241,6 @@ def crawler_worker():
         if not job:
             time.sleep(10)
 
-# ✅ ONLY CHANGE HERE
 if RUN_WORKER:
     threading.Thread(
         target=crawler_worker,
@@ -235,7 +248,7 @@ if RUN_WORKER:
     ).start()
 
 # =========================================================
-# CSV HELPER
+# CSV HELPER (UNCHANGED)
 # =========================================================
 def csv_stream(rows):
     if not rows:
@@ -249,7 +262,7 @@ def csv_stream(rows):
     return buffer
 
 # =========================================================
-# 📤 EXPORTS
+# 📤 EXPORTS (UNCHANGED)
 # =========================================================
 @app.get("/export/output-1")
 def export_output_1():
