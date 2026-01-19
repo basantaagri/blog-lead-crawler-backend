@@ -96,17 +96,21 @@ def is_valid_url(url: str) -> bool:
         return False
 
 # =========================================================
-# CRAWL — ROOT ONLY (UNCHANGED LOGIC)
+# 🔒 SAFE /crawl — NEVER THROWS RAW EXCEPTIONS
 # =========================================================
 @app.post("/crawl")
 def crawl_blog(req: CrawlRequest):
     blog_url = req.blog_url.strip().rstrip("/")
 
     if not blog_url:
-        raise HTTPException(400, "blog_url required")
+        return {"status": "error", "reason": "blog_url_missing"}
 
     if not is_valid_url(blog_url):
-        raise HTTPException(400, "Invalid blog_url")
+        return {
+            "status": "error",
+            "reason": "invalid_blog_url",
+            "blog_url": blog_url
+        }
 
     try:
         with DB_LOCK:
@@ -118,10 +122,15 @@ def crawl_blog(req: CrawlRequest):
                         ON CONFLICT (blog_url) DO NOTHING
                     """, (blog_url,))
                     conn.commit()
-    except Exception:
-        raise HTTPException(503, "Database temporarily unavailable")
 
-    return {"status": "ok", "message": "blog queued"}
+        return {"status": "queued", "blog_url": blog_url}
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "reason": "database_unavailable",
+            "detail": str(e)
+        }
 
 # =========================================================
 # HISTORY (UNCHANGED)
@@ -166,9 +175,11 @@ def safe_fetch(url: str):
             return requests.get(url.replace("https://", "http://", 1), headers=headers, timeout=15)
         except Exception:
             return None
+    except Exception:
+        return None
 
 # =========================================================
-# CORE CRAWLER — ZERO-ERROR HARDENED
+# 🔁 CORE CRAWLER — ZERO-ERROR HARDENED
 # =========================================================
 def crawler_worker_single():
     with DB_LOCK:
@@ -200,11 +211,13 @@ def crawler_worker_single():
 
     try:
         resp = safe_fetch(blog_url)
-        if not resp or resp.status_code != 200:
-            raise Exception("Unreachable")
+        if not resp:
+            raise Exception("request_failed")
+        if resp.status_code != 200:
+            raise Exception(f"http_{resp.status_code}")
 
         soup = BeautifulSoup(resp.text, "html.parser")
-        links = soup.find_all("a", href=True)
+        links = soup.find_all("a", href=True) or []
 
         with DB_LOCK:
             with get_conn() as conn:
@@ -217,6 +230,9 @@ def crawler_worker_single():
                         full_url = safe_text(lambda: urljoin(blog_url, href))
                         domain = safe_text(lambda: extract_domain(full_url))
                         anchor = safe_text(lambda: a.get_text(strip=True), "")[:255]
+
+                        if not full_url or not domain:
+                            continue
 
                         cur.execute("""
                             INSERT INTO outbound_links
@@ -251,7 +267,7 @@ def crawler_worker_single():
         print(f"❌ Failed blog {blog_url}: {e}")
 
 # =========================================================
-# WORKER LOOP (UNCHANGED)
+# ♾️ WORKER LOOP (UNCHANGED)
 # =========================================================
 def crawler_worker():
     print("### LONG-LIVED CRAWLER WORKER STARTED ###")
@@ -264,7 +280,7 @@ if RUN_WORKER:
     threading.Thread(target=crawler_worker, daemon=False).start()
 
 # =========================================================
-# CSV + EXPORTS
+# 📤 EXPORTS
 # =========================================================
-# ✅ ALL EXPORT ENDPOINTS REMAIN **EXACTLY AS YOU HAVE THEM**
-# output-1, output-2, output-3, per-blog ZIP
+# ✅ output-1, output-2, output-3, per-blog ZIP
+# ✅ REMAIN **EXACTLY AS YOU ALREADY HAVE THEM**
