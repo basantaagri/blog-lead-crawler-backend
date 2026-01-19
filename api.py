@@ -69,7 +69,7 @@ def health():
     return {"status": "ok"}
 
 # =========================================================
-# 🔒 URL VALIDATION (ONLY REQUIRED ADDITION)
+# 🔒 URL VALIDATION (UNCHANGED)
 # =========================================================
 def is_valid_url(url: str) -> bool:
     try:
@@ -79,7 +79,7 @@ def is_valid_url(url: str) -> bool:
         return False
 
 # =========================================================
-# 🧱 CRAWL — ROOT ONLY (SAFE)
+# 🧱 CRAWL — ROOT ONLY (UNCHANGED)
 # =========================================================
 @app.post("/crawl")
 def crawl_blog(req: CrawlRequest):
@@ -244,7 +244,7 @@ if RUN_WORKER:
     threading.Thread(target=crawler_worker, daemon=False).start()
 
 # =========================================================
-# CSV HELPER (FIXED — NO INTERNAL ERROR)
+# CSV HELPER (UNCHANGED)
 # =========================================================
 def csv_stream(rows):
     buffer = io.StringIO()
@@ -261,7 +261,7 @@ def csv_stream(rows):
     return buffer
 
 # =========================================================
-# 📤 EXPORTS
+# 📤 EXPORTS (UNCHANGED)
 # =========================================================
 @app.get("/export/output-1")
 def export_output_1():
@@ -351,4 +351,56 @@ def export_output_3():
         csv_stream(rows),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=output_3_blog_summary.csv"},
+    )
+
+# =========================================================
+# 📦 NEW: PER-BLOG CSV SPLIT (ONLY ADDITION)
+# =========================================================
+@app.get("/export/per-blog")
+def export_per_blog():
+    with DB_LOCK:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT
+                      bp.blog_url,
+                      ol.url AS commercial_url,
+                      ol.commercial_domain,
+                      ol.is_dofollow,
+                      cs.is_casino
+                    FROM blog_pages bp
+                    LEFT JOIN outbound_links ol ON bp.id = ol.blog_page_id
+                    LEFT JOIN commercial_sites cs ON cs.commercial_domain = ol.commercial_domain
+                    WHERE bp.is_root = TRUE
+                    ORDER BY bp.blog_url
+                """)
+                rows = cur.fetchall()
+
+    blogs = {}
+    for r in rows:
+        blogs.setdefault(r["blog_url"], []).append(r)
+
+    import zipfile
+    zip_buffer = io.BytesIO()
+
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for blog_url, blog_rows in blogs.items():
+            filename = blog_url.replace("https://", "").replace("http://", "").replace("/", "_")
+            csv_buf = io.StringIO()
+
+            if blog_rows and blog_rows[0]["commercial_url"] is not None:
+                writer = csv.DictWriter(csv_buf, fieldnames=blog_rows[0].keys())
+                writer.writeheader()
+                writer.writerows(blog_rows)
+            else:
+                csv_buf.write("blog_url,commercial_url,commercial_domain,is_dofollow,is_casino\n")
+
+            zf.writestr(f"{filename}.csv", csv_buf.getvalue())
+
+    zip_buffer.seek(0)
+
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=per_blog_csvs.zip"},
     )
